@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# One tmux session per Desktop folder, in WSL. Installed under several names:
+#   td / tmuxdesktop   a shell in the folder
+#   tc / tmuxclaude    Claude Code in the folder
+set -euo pipefail
+
+case "$(basename "$0")" in
+    tc | tmuxclaude) MODE=claude ;;
+    td | tmuxdesktop) MODE=desktop ;;
+    *) echo "Install as tc, td, tmuxclaude or tmuxdesktop" >&2; exit 1 ;;
+esac
+ME=$(basename "$0")
+
+usage() {
+    cat <<HELP
+Usage: $ME [options] [folder]
+
+Opens (or reattaches to) a tmux session in a Desktop folder$([[ $MODE == claude ]] && echo ", running Claude Code").
+The folder name can be partial and any case: "pix" finds pixlr, "rsr/ana" finds rsrCrafts/analytics.
+
+Options:
+  -n        Always start a new session (numbered: ${MODE}-pixlr-1, -2, ...)
+$([[ $MODE == claude ]] && printf '%s\n' \
+"  -c        Continue the most recent conversation (claude --continue)" \
+"  -r        Pick a conversation to resume, including Windows ones (cresume)")
+  -l        List running sessions
+  -h        This help
+
+Examples:
+  $ME                 Desktop itself
+  $ME pix             pixlr
+  $ME -n pix          a second session in pixlr
+$([[ $MODE == claude ]] && printf '%s\n' "  $ME -c pix          pixlr, continuing the last chat" "  $ME -r pix          pixlr, choosing a chat to resume")
+Detach: Ctrl+b then d. Sessions keep running after you detach or close the terminal.
+HELP
+}
+
+NEW=false START=claude PROJECT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n | --new) NEW=true ;;
+        -c | --continue) START="claude --continue" ;;
+        -r | --resume) START=cresume ;;
+        -l | --list) tmux list-sessions 2>/dev/null || echo "No sessions running."; exit 0 ;;
+        -h | --help) usage; exit 0 ;;
+        -*) echo "Unknown option: $1 (see $ME -h)" >&2; exit 1 ;;
+        *) [[ -z $PROJECT ]] || { echo "Only one folder, please." >&2; exit 1; }; PROJECT=$1 ;;
+    esac
+    shift
+done
+if [[ $MODE == desktop && $START != claude ]]; then
+    echo "-c and -r are for tc (tmuxclaude)." >&2
+    exit 1
+fi
+
+# Asking Windows costs a PowerShell start, so remember the answer until the folder disappears.
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/tmuxgo-desktop
+DESKTOP=$(cat "$CACHE" 2>/dev/null || true)
+if [[ ! -d $DESKTOP ]]; then
+    DESKTOP=$(wslpath "$(powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('Desktop')" | tr -d '\r')")
+    mkdir -p "$(dirname "$CACHE")"
+    printf '%s' "$DESKTOP" >"$CACHE"
+fi
+
+# Resolves one path part inside $1: exact name, then case-insensitive, then prefix, then substring.
+# Returning the on-disk spelling matters: Claude Code keys history by the path as typed, so "Pixlr" and
+# "pixlr" would otherwise be two separate histories.
+match_dir() {
+    local parent=$1 want=${2,,} name exact="" prefix=() part=()
+    while IFS= read -r name; do
+        case "${name,,}" in
+            "$want") exact=$name ;;
+            "$want"*) prefix+=("$name") ;;
+            *"$want"*) part+=("$name") ;;
+        esac
+    done < <(find "$parent" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' | sort)
+    if [[ -n $exact ]]; then echo "$exact"; return; fi
+    local found=("${prefix[@]}")
+    [[ ${#found[@]} -gt 0 ]] || found=("${part[@]}")
+    if [[ ${#found[@]} -eq 1 ]]; then echo "${found[0]}"; return; fi
+    if [[ ${#found[@]} -eq 0 ]]; then
+        echo "No folder matching \"$2\" in $parent. Folders:" >&2
+        find "$parent" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '  %f\n' | sort >&2
+    else
+        echo "\"$2\" matches several folders, be more specific:" >&2
+        printf '  %s\n' "${found[@]}" >&2
+    fi
+    return 1
+}
+
+WORKDIR=$DESKTOP
+SESSION=$MODE
+if [[ -n $PROJECT ]]; then
+    IFS=/ read -ra parts <<<"$PROJECT"
+    for p in "${parts[@]}"; do
+        [[ -n $p ]] || continue
+        WORKDIR=$WORKDIR/$(match_dir "$WORKDIR" "$p") || exit 1
+    done
+    SLUG=$(printf '%s' "${WORKDIR#"$DESKTOP"/}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+    SESSION=$MODE-$SLUG
+fi
+
+exists() { tmux has-session -t "=$1" 2>/dev/null; }
+
+# Inside tmux, attach would nest a session in a pane; switch the client instead.
+go() {
+    if [[ -n ${TMUX:-} ]]; then exec tmux switch-client -t "=$1"; else exec tmux attach-session -t "=$1"; fi
+}
+
+if [[ $NEW == true ]]; then
+    n=1
+    while exists "$SESSION-$n"; do n=$((n + 1)); done
+    SESSION=$SESSION-$n
+elif exists "$SESSION"; then
+    [[ $START == claude ]] || echo "$SESSION is already running; attaching to it as it is (-n starts another)."
+    go "$SESSION"
+fi
+
+# Without this, closing the last window (or the phone's SSH) shuts WSL down and the new session with it.
+pgrep -f '^tm-keepalive' >/dev/null || "$(dirname "$(readlink -f "$0")")/tm" start || true
+
+echo "Starting $SESSION in $WORKDIR"
+if [[ $MODE == claude ]]; then
+    tmux new-session -d -s "$SESSION" -c "$WORKDIR" "bash -ic '$START; exec bash'"
+else
+    tmux new-session -d -s "$SESSION" -c "$WORKDIR"
+fi
+go "$SESSION"

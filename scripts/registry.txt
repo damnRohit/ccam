@@ -1,0 +1,33 @@
+# Every personal command, in one place. `cmds` prints this; `cmds --check` warns about commands missing here.
+# One line per command: group | name (other names) | where it runs | what it does | examples, separated by ;
+# Lines starting with # are ignored.
+
+tmux | tc (tmuxclaude) | WSL, Windows | Claude Code in a Desktop folder, in a tmux session that keeps running when you close the terminal | tc pix; tc -c pix  (continue the last chat); tc -r pix  (pick a chat to resume); tc -n pix  (a second session)
+tmux | td (tmuxdesktop) | WSL, Windows | A shell in a Desktop folder, in a tmux session | td; td pix; td rsr/ana  (rsrCrafts/analytics)
+tmux | tm | WSL, Windows | List, open and remove tmux sessions by number or name; show several on one screen | tm  (numbered list); tm 2; tm pix; tm 1 3  (both on one screen, phone too); tm -u 1 3  (up/down); tm -s 1 3  (side by side); tm rm 3; tm rm all; tm start  (keep WSL running so sessions survive); tm stop; tm help  (full guide: keys, switching, phone)
+tmux | Ctrl+b d | inside tmux | Leave the session running and go back to the plain terminal (detach) | Ctrl+b then d
+tmux | Ctrl+b s | inside tmux | Pick another session from a list, with a preview | Ctrl+b then s, arrows, Enter
+tmux | Ctrl+b ( ) L | inside tmux | Previous, next, or last-used session | Ctrl+b then (;Ctrl+b then );Ctrl+b then L  (flip between two)
+tmux | F1 F2 F3 F4 | inside tmux (phone: Termius key row) | One tap, no Ctrl: F1 next pane, F2 zoom pane full screen and back, F3 change layout, F4 leave | F1;F2;F3;F4
+tmux | Ctrl+b Space, z | inside tmux | Same as F3 and F2 with the usual tmux keys | Ctrl+b then Space;Ctrl+b then z
+
+chats | cresume | WSL | Resume a Claude chat, including chats from Windows; newest first | cresume  (this folder); cresume -a  (all projects); cresume 50  (show more)
+
+accounts | cs (ccam, cswitch) | Windows, WSL | Claude account switcher; every command below works as cs or ccam | cs help; cs help to
+accounts | csw | Windows | cs for WSL's Claude, typed in PowerShell or cmd (WSL and Windows share the saved accounts; one account live on one side at a time) | csw list; csw usage; csw to second
+accounts | cs list | Windows | Saved accounts; * marks the one logged in | cs list
+accounts | cs usage | Windows | 5-hour and 7-day use of every account, with reset times | cs usage; cs usage --json
+accounts | cs to | Windows, WSL | Switch account; a running Claude uses it from its next message. Refuses an account the other side (Windows/WSL) is using | cs to second; cs to second --open; cs to second --continue; cs to second --force  (moves the other side to the best free account first); (in Claude) ! cs to second --restart
+accounts | cs save | Windows | Save the account you are logged in to | (in Claude) /login, then: cs save work2
+accounts | cs rename | Windows | Rename a saved account | cs rename second personal
+accounts | cs remove | Windows | Forget a saved account | cs remove old-trial
+accounts | cs start | Windows | Start every account's 5-hour window with one tiny message, so they reset together | cs start
+accounts | cs auto | Windows | Watch usage and switch (or only alert) before the limit | cs auto --notify; cs auto --threshold 95; cs auto status; cs auto stop
+accounts | cs notify-test | Windows | Test alert: bell plus desktop popup with sound | cs notify-test
+accounts | cs setup | Windows | Add the hooks that keep saved logins fresh (--auto: also for cs auto) | cs setup; cs setup --auto
+accounts | cs sync | Windows | Save the renewed login by hand (the hooks normally do it) | cs sync
+accounts | cs uninstall | Windows | Remove the hooks; saved accounts stay | cs uninstall
+
+wsl | wslfix | Windows | WSL lost the C: drive ("Input/output error" on /mnt/c, ccam or cresume fail in WSL), usually after sleep: reconnect it without restarting WSL, tmux sessions stay | wslfix  (then in open WSL shells: cd .)
+
+help | cmds | WSL, Windows | This list | cmds; cmds tc  (full help of one command); cmds cs auto; cmds --check

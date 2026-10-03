@@ -1,0 +1,5 @@
+* text=auto
+# Shell and Python scripts run inside WSL/Linux; a CRLF checkout on Windows would break them.
+scripts/* text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf

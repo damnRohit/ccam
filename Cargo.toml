@@ -1,0 +1,44 @@
+[package]
+name = "ccam"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Keep several Claude subscription logins and switch Claude Code between them"
+license = "MIT"
+readme = "README.md"
+keywords = ["claude", "claude-code", "cli", "accounts"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+filetime = "0.2.29"
+hex = "0.4.3"
+jiff = { version = "0.2.37", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+
+[features]
+default = ["tls"]
+# HTTPS support. Only ever disabled to type-check other targets on a machine without a C cross-compiler;
+# a build without it refuses to make network requests (see api.rs).
+tls = ["ureq/rustls"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

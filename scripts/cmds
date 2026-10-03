@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Prints the registry of personal commands (registry.txt next to this script); `cmds <name>` shows that
+# command's own help; `cmds --check` lists commands in the bin folders that the registry does not mention.
+set -euo pipefail
+
+HERE=$(dirname "$(readlink -f "$0")")
+REGISTRY=$HERE/registry.txt
+
+rows() { grep -v '^\s*\(#\|$\)' "$REGISTRY"; }
+trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
+list() {
+    local group name where what examples last=""
+    while IFS='|' read -r group name where what examples; do
+        group=$(trim "$group")
+        if [[ $group != "$last" ]]; then
+            printf '\n\033[1m%s\033[0m\n' "$group"
+            last=$group
+        fi
+        printf '  \033[1m%s\033[0m  %s  \033[2m(%s)\033[0m\n' "$(trim "$name")" "$(trim "$what")" "$(trim "$where")"
+        IFS=';' read -ra ex <<<"$examples"
+        for e in "${ex[@]}"; do printf '      \033[36m%s\033[0m\n' "$(trim "$e")"; done
+    done < <(rows)
+    printf '\nFull help of one command: cmds <name>   (e.g. cmds tc, cmds cs auto)\n'
+}
+
+detail() {
+    case "$1" in
+        # By path: shells started from Windows put /usr/sbin (with Linux's own tc) ahead of ~/bin.
+        tc | td | tm | cresume | tmuxclaude | tmuxdesktop) "$HERE/$1" -h ;;
+        cs | ccam | cswitch)
+            shift
+            # WSL can run the Windows build until ccam is installed in WSL itself.
+            local bin
+            bin=$(command -v ccam || command -v ccam.exe || true)
+            [[ -n $bin ]] || { echo "ccam is not installed here." >&2; exit 1; }
+            "$bin" help "$@"
+            ;;
+        *) echo "No command \"$1\". Run cmds to see them all." >&2; exit 1 ;;
+    esac
+}
+
+# Every word of the name column counts as registered, so "tc (tmuxclaude)" covers both.
+check() {
+    local known win missing=()
+    known=$(rows | cut -d'|' -f2 | tr -c 'A-Za-z0-9_.-' '\n' | sort -u)
+    win=$(wslpath "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null </dev/null | tr -d '\r')" 2>/dev/null || true)
+    local dirs=("$HOME/bin")
+    [[ -n $win ]] && dirs+=("$win/bin" "$win/.local/bin")
+    for dir in "${dirs[@]}"; do
+        [[ -d $dir ]] || continue
+        for f in "$dir"/*; do
+            # DrvFs shows every Windows file as executable, so on the Windows side only .cmd counts.
+            if [[ $dir == /mnt/* ]]; then [[ $f == *.cmd ]] || continue; else [[ -f $f && -x $f ]] || continue; fi
+            local n
+            n=$(basename "$f")
+            n=${n%.cmd}
+            [[ $n == registry.txt || $n == *.bak || $n == tmuxgo || $n == claude* ]] && continue
+            grep -qx -- "$n" <<<"$known" || missing+=("$n  ($dir)")
+        done
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "Every command in your bin folders is in the registry."
+    else
+        echo "Not in the registry yet (add a line to $REGISTRY):"
+        printf '  %s\n' "${missing[@]}" | sort -u
+    fi
+}
+
+case "${1:-}" in
+    "" | -h | --help) list ;;
+    --check) check ;;
+    *) detail "$@" ;;
+esac

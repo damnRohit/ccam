@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# List, open and remove tmux sessions by number or name.
+set -euo pipefail
+
+usage() {
+    cat <<'HELP'
+tm: your tmux sessions, by number or name.
+
+COMMANDS
+  tm                 List sessions, numbered (oldest first, so a number stays the same)
+  tm 2               Open session 2           tm pix   open the one whose name contains "pix"
+  tm 1 3             Show sessions 1 and 3 on one screen (a "view"); any count: tm 1 2 3 4
+                     wide screen: side by side, narrow (phone): up/down, 4 or more: grid
+  tm -s 1 3          Force side by side       tm -u 1 3   force up/down
+  tm rm 3            Remove session 3         tm rm 1 4   several    tm rm all   every one (asks)
+  tm start           Keep WSL running when every window is closed, so sessions survive
+  tm stop            Let WSL shut down again when no window is open
+  tm help            This guide
+
+START A SESSION
+  tc pix             Claude Code in the pixlr folder       tc -c pix   continue the last chat
+  td pix             A plain shell in the pixlr folder     tc -r pix   pick a chat to resume
+  Both reattach if that session already runs, and run tm start for you.
+
+KEYS INSIDE TMUX (one tap each; on a phone they are on Termius's extra key row)
+  F1                 Next pane
+  F2                 Zoom this pane full screen, press again to see all panes
+  F3                 Next layout: side by side, up/down, grid
+  F4                 Leave (detach). Everything keeps running; come back with tm
+  Same with the usual keys: press Ctrl+b, let go, then:
+    d  leave          s  pick a session from a list      ( )  previous / next session
+    L  back to the last session       arrow  move to that pane       z  zoom    Space  layout
+  In a view, those keys act on the view. For the session inside a pane press Ctrl+b twice.
+  In Windows Terminal you can also click a pane and scroll with the mouse wheel.
+
+SWITCHING BETWEEN SESSIONS
+  From a shell:      tm 2  (or tm pix)
+  Inside tmux:       Ctrl+b s  and pick, or Ctrl+b ( and ), or Ctrl+b L to flip between two
+  Two at once:       tm 1 2, then F1 to move between them and F2 to focus on one
+
+FROM A PHONE (Termius over SSH)
+  1. Connect, open WSL, run tm to see the list
+  2. tm 2 for one session, or tm 1 2 for two stacked up/down
+  3. F1 moves between panes, F2 makes one full screen while you type, F4 leaves
+  Tapping a pane does not work in Termius: it keeps taps for its own gestures. Use F1.
+
+WHY SESSIONS DISAPPEAR
+  WSL shuts down about 15 s after its last window closes (or the phone's SSH ends), and every
+  tmux session goes with it. tm start prevents that; td, tc and tm views run it for you.
+  The first line of tm says whether it is on. tm stop turns it off.
+
+REMOVING
+  tm rm <n>          Asks first if the session is open in a terminal
+  tm rm view-...     Closes a view only; the sessions inside keep running
+  Names can be partial ("pix") when only one session contains them.
+HELP
+}
+
+# Oldest first, so a number keeps meaning the same session while newer ones come and go. session_id ($N) grows
+# with every new session; session_created only has 1-second resolution and ties would sort by name.
+sessions() {
+    { tmux list-sessions -F '#{session_id}	#{session_name}	#{pane_current_path}' 2>/dev/null || true; } |
+        sed 's/^\$//' | sort -n | cut -f2-
+}
+
+# Terminals showing a session, not counting the panes of tm views: those are clients too, but closing the view
+# is what leaves them.
+open_count() {
+    local view_ttys
+    view_ttys=$(tmux list-panes -a -F '#{session_name} #{pane_tty}' 2>/dev/null | awk '$1 ~ /^view-/ {print $2}')
+    tmux list-clients -t "=$1" -F '#{client_tty}' 2>/dev/null | grep -cvxF -f <(printf '%s\n' "$view_ttys") || true
+}
+
+list() {
+    local rows
+    rows=$(sessions)
+    if keepalive_running; then
+        echo "WSL: kept running, sessions survive closing every window (tm stop to undo)"
+    else
+        echo "WSL: shuts down 15 s after the last window closes, taking these sessions with it (tm start)"
+    fi
+    if [[ -z $rows ]]; then
+        echo "No tmux sessions. Start one with: tc <folder> or td <folder>"
+        return
+    fi
+    local i=0 name path here
+    here=$(current)
+    while IFS=$'\t' read -r name path; do
+        i=$((i + 1))
+        local mark=" "
+        [[ $name == "$here" ]] && mark="*"
+        local state=""
+        (($(open_count "$name") > 0)) && state="open"
+        printf '%s%2d  %-32s %-5s %s\n' "$mark" "$i" "$name" "$state" "${path/#\/mnt\/c\/Users\/*\/Desktop\//~Desktop/}"
+    done <<<"$rows"
+}
+
+current() { [[ -n ${TMUX:-} ]] && tmux display-message -p '#S' 2>/dev/null || true; }
+
+# Prints the session name for a number, an exact name, or a unique part of a name.
+resolve() {
+    local want=$1 names found=()
+    names=$(sessions | cut -f1)
+    # "0" is not a list position, so it falls through to the name match (plain tmux names sessions 0, 1, ...).
+    if [[ $want =~ ^[1-9][0-9]*$ ]]; then
+        local name
+        name=$(sed -n "${want}p" <<<"$names")
+        [[ -n $name ]] || { echo "No session number $want. Run tm to see the list." >&2; return 1; }
+        echo "$name"
+        return
+    fi
+    while IFS= read -r n; do
+        [[ -z $n ]] && continue
+        [[ $n == "$want" ]] && { echo "$n"; return; }
+        # A view's name contains its sessions' names, so partial names only match real sessions.
+        [[ $n != view-* && ${n,,} == *"${want,,}"* ]] && found+=("$n")
+    done <<<"$names"
+    case ${#found[@]} in
+        1) echo "${found[0]}" ;;
+        0) echo "No session matching \"$want\". Run tm to see the list." >&2; return 1 ;;
+        *) echo "\"$want\" matches several sessions:" >&2; printf '  %s\n' "${found[@]}" >&2; return 1 ;;
+    esac
+}
+
+go() {
+    local name
+    name=$(resolve "$1")
+    # Inside tmux, attach would nest a session in a pane; switch the client instead.
+    if [[ -n ${TMUX:-} ]]; then exec tmux switch-client -t "=$name"; else exec tmux attach-session -t "=$name"; fi
+}
+
+# Several sessions in one screen: a "view" session whose panes each attach to one of them, so it works in
+# any terminal, including SSH from a phone. Removing the view leaves the real sessions untouched; each pane is
+# only another client of its session.
+open_many() {
+    local layout=$1 names=() arg
+    shift
+    for arg in "$@"; do
+        arg=$(resolve "$arg")
+        [[ $arg == view-* ]] && { echo "$arg is itself a view; pick the sessions inside it." >&2; exit 1; }
+        names+=("$arg")
+    done
+    local view cols lines
+    view="view-$(IFS=+; echo "${names[*]}")"
+    # A view loses a pane when a session inside it ends; rebuild it rather than reopen it half empty.
+    if tmux has-session -t "=$view" 2>/dev/null &&
+        (($(tmux display-message -p -t "=$view:" '#{window_panes}') != ${#names[@]})); then
+        tmux kill-session -t "=$view"
+    fi
+    if ! tmux has-session -t "=$view" 2>/dev/null; then
+        keepalive_running || keepalive_start || true
+        cols=$(tput cols 2>/dev/null || echo 120)
+        lines=$(tput lines 2>/dev/null || echo 40)
+        if [[ -z $layout ]]; then
+            if ((${#names[@]} > 3)); then layout=tiled
+            elif ((cols < 120)); then layout=even-vertical
+            else layout=even-horizontal; fi
+        fi
+        # A pane runs its own tmux client, which refuses to start while TMUX says it is inside tmux. %q keeps a
+        # quote in a session name from breaking the pane's command line.
+        tmux new-session -d -s "$view" -x "$cols" -y "$lines" "env -u TMUX tmux attach-session -t $(printf '%q' "=${names[0]}")"
+        for arg in "${names[@]:1}"; do
+            tmux split-window -t "=$view:" "env -u TMUX tmux attach-session -t $(printf '%q' "=$arg")"
+            tmux select-layout -t "=$view:" tiled >/dev/null
+        done
+        tmux select-layout -t "=$view:" "$layout" >/dev/null
+        tmux set-option -t "=$view:" status off >/dev/null
+        tmux set-option -t "=$view:" mouse on >/dev/null
+    fi
+    if [[ -n ${TMUX:-} ]]; then exec tmux switch-client -t "=$view"; else exec tmux attach-session -t "=$view"; fi
+}
+
+# WSL shuts a distro down 15 s after its last wsl.exe window closes, killing every tmux session, even when tmux
+# was started over SSH from a phone. A hidden wsl.exe running a named sleep keeps it up. It is created through
+# WMI, so its parent is the WMI service rather than this shell: Windows' OpenSSH server ends every process of a
+# session when the phone disconnects, and a child started with Start-Process would go with it.
+KEEPALIVE=tm-keepalive
+keepalive_running() { pgrep -f "^$KEEPALIVE" >/dev/null; }
+
+keepalive_start() {
+    if keepalive_running; then
+        echo "WSL is already kept running (tm stop to undo)."
+        return
+    fi
+    local ps
+    ps="\$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ProcessStartupInformation=\$si;
+  CommandLine='wsl.exe -d ${WSL_DISTRO_NAME:-Ubuntu} -e bash -c \"exec -a $KEEPALIVE sleep infinity\"'}"
+    # Base64 UTF-16 sidesteps quoting through the WSL-to-Windows command line.
+    powershell.exe -NoProfile -EncodedCommand "$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)" >/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        keepalive_running && { echo "WSL now keeps running with no window open; tmux sessions survive. (tm stop to undo)"; return; }
+        sleep 0.5
+    done
+    echo "Could not start the keep-alive." >&2
+    return 1
+}
+
+keepalive_stop() {
+    if pkill -f "^$KEEPALIVE"; then
+        echo "Stopped. WSL (and every tmux session) shuts down about 15 s after the last window closes."
+    else
+        echo "WSL was not being kept running."
+    fi
+}
+
+confirm() {
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ ${answer,,} == y || ${answer,,} == yes ]]
+}
+
+remove() {
+    [[ $# -gt 0 ]] || { echo "Which one? e.g. tm rm 2" >&2; exit 1; }
+    local targets=()
+    if [[ $1 == all ]]; then
+        mapfile -t targets < <(sessions | cut -f1)
+        [[ ${#targets[@]} -gt 0 ]] || { echo "No sessions."; return; }
+        confirm "Remove all ${#targets[@]} sessions?" || return 0
+    else
+        # Resolve every argument first: numbers shift once a session is gone.
+        for arg in "$@"; do targets+=("$(resolve "$arg")"); done
+        for name in "${targets[@]}"; do
+            if (($(open_count "$name") > 0)); then
+                confirm "$name is open in a terminal; remove it anyway?" || return 0
+            fi
+        done
+    fi
+    # The session tm runs in goes last: killing it ends tm, and anything after it would survive.
+    local here removing_here=false
+    here=$(current)
+    for name in "${targets[@]}"; do
+        if [[ $name == "$here" ]]; then removing_here=true; continue; fi
+        tmux kill-session -t "=$name" && echo "Removed $name"
+    done
+    if $removing_here; then
+        echo "Removed $here"
+        tmux kill-session -t "=$here"
+    fi
+}
+
+layout=""
+args=()
+for a in "$@"; do
+    case "$a" in
+        -u | --updown) layout=even-vertical ;;
+        -s | --side) layout=even-horizontal ;;
+        *) args+=("$a") ;;
+    esac
+done
+set -- "${args[@]}"
+
+case "${1:-}" in
+    "") list ;;
+    -h | --help | help) usage ;;
+    rm | kill) shift; remove "$@" ;;
+    start) keepalive_start ;;
+    stop) keepalive_stop ;;
+    -*) echo "Unknown option: $1 (see tm -h)" >&2; exit 1 ;;
+    *) if (($# > 1)); then open_many "$layout" "$@"; else go "$1"; fi ;;
+esac
