@@ -76,14 +76,21 @@ const _: () = assert!(
     LockTiming::CREDENTIALS_AFTER_KILL.wait.as_millis() > LockTiming::CREDENTIALS_AFTER_KILL.stale_after.as_millis()
 );
 
-/// Identity of a lock directory, so a lock deleted and recreated under the same name is told apart.
+/// Identity of a lock directory, so a lock deleted and recreated under the same name is told apart: volume, file
+/// number, and on Unix the birth time, where the filesystem records one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DirId(u64, u64);
+struct DirId(u64, u64, Option<u128>);
 
 #[cfg(unix)]
 fn dir_id(path: &Path) -> Option<DirId> {
     use std::os::unix::fs::MetadataExt;
-    fs::metadata(path).ok().map(|m| DirId(m.dev(), m.ino()))
+    // ext4 and others hand a freed inode number straight to the next directory created, so a lock recreated by
+    // another process often has the same (dev, ino). Its birth time differs. ctime cannot stand in where birth
+    // time is missing: the heartbeat's mtime touch changes it.
+    fs::metadata(path).ok().map(|m| {
+        let born = m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        DirId(m.dev(), m.ino(), born)
+    })
 }
 
 #[cfg(windows)]
@@ -120,6 +127,7 @@ fn dir_id(path: &Path) -> Option<DirId> {
             DirId(
                 u64::from(info.dwVolumeSerialNumber),
                 (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+                None,
             )
         })
     }
