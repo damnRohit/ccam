@@ -2,6 +2,9 @@
 
 Claude Code Account Manager. Keep several Claude subscription logins on one machine and switch Claude Code between them, without `/logout` and `/login` and without losing your conversation history.
 
+<img width="582" height="397" alt="image" src="https://github.com/user-attachments/assets/193c0384-1f51-47f0-966a-e3dcfbe2e545" />
+
+
 ```text
 $ ccam list
 * work      (pro)
