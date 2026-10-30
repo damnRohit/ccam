@@ -18,11 +18,25 @@ Examples:
 
 pub const SAVE: &str = "\
 Names start with a letter or digit, then use letters, digits, '.', '_', '@' or '-' (max 64).
+To add another account, use `ccam login <name>`: it signs in without replacing the live login.
 
 Examples:
   ccam save work                   Save the live login as \"work\"
-  (in Claude) /login, then:
-  ccam save work2                  Add another account";
+  ccam save work --lane 1          Save the login from lane 1";
+
+pub const LOGIN: &str = "\
+Give the name first. Claude Code's own sign-in then opens your browser; sign in to the account you want
+saved under that name. If the browser does not open, open the link it prints and paste the code back here.
+If your browser is already signed in to another Claude account, use a private window, or that account is
+signed in instead. The main login, lanes and running sessions are not touched.
+
+`ccam login <existing>` replaces that account's saved login with a new one, for when it stopped working.
+This is refused while the account is in use (the main login, a lane, or your other side).
+
+Examples:
+  ccam login work2                 Add another account as \"work2\"
+  ccam to work2                    Then switch to it
+  ccam login work                  New saved login for \"work\" when its old one stopped working";
 
 pub const RENAME: &str = "\
 Examples:
@@ -64,7 +78,8 @@ pub const USAGE: &str = "\
 Examples:
   ccam usage               Boxes with 5-hour and 7-day use and reset times
   ccam usage --refresh     Also renew expired logins of accounts not in use
-  ccam usage --json        Machine-readable output for scripts";
+  ccam usage --json        Machine-readable output for scripts
+  ccam usage --email       Also show each account's email address (only shown here, never logged)";
 
 pub const SYNC: &str = "\
 Claude Code renews its login every few hours and the old refresh token stops working. The hooks from
@@ -116,3 +131,66 @@ Stop using the old script afterwards: two tools renewing the same logins break e
 
 Examples:
   ccam import-legacy";
+
+pub const RUN: &str =
+    "Opens Claude Code in this terminal inside a lane: a Claude config dir that holds one account. `ccam to` and
+other terminals do not move a lane, so its sessions keep their account and their prompt cache. Lanes share
+your conversations, memory, plugins, skills and settings with the main login, so /resume works across them.
+
+`ccam run <account>` makes a new lane (numbered 1, 2, ...), or joins the lane that already holds the account.
+`--lane <id>` joins that lane, or creates it under that number or name. An account is in one place at a time:
+the main login or one lane, because two copies of one login would log each other out.
+Needs Claude Code 2.1.296 or later. Every lane event is logged to switch.log, tagged [lane <id>].
+
+Examples:
+  ccam run work                      Claude Code on 'work' in a new lane (or work's lane)
+  ccam run personal --continue       Continue this folder's latest chat on 'personal'
+  ccam run work --lane api           A lane named 'api' on 'work'
+  ccam run --lane 2                  Another terminal in lane 2, on whatever account it holds
+  ccam run --lane 2 -- --continue    The same, continuing the latest chat";
+
+pub const LANE: &str =
+    "Checks a saved account out into a lane without opening Claude Code, for programs that run Claude Code
+themselves, such as T3 Code. It picks the lane as `ccam run` does (the lane already holding the account, a
+free lane, or --lane) and refuses the same cases.
+
+With T3 Code installed, every lane is a Claude instance in T3's model picker, named after the account it
+holds. `ccam run`, `move`, `release` and `prune` keep those instances up to date; a released lane's instance
+is turned off, a deleted lane's is removed. Lane sessions pick up edits to your main settings.json, CLAUDE.md
+and keybindings.json when they start.
+
+Examples:
+  ccam lane work                     'work' in a new lane (or work's lane)
+  ccam lane work --lane api          A lane named 'api' on 'work'";
+
+pub const MOVE: &str =
+    "Switches a lane to another saved account. Every session in the lane uses the new account from its next
+message and rebuilds its prompt cache once; other lanes and the main login are untouched. Asks first; --yes
+skips the question (required when not run from a terminal).
+
+Examples:
+  ccam move 2 personal               Lane 2 to 'personal', after confirming
+  ccam move api work --yes";
+
+pub const RELEASE: &str =
+    "Saves the lane's login back and logs the lane out, so the main login and other lanes can use the account.
+Refused while sessions run in the lane (see ccam sessions); --force releases anyway and logs them out. --delete
+also removes the lane folder.
+
+Examples:
+  ccam release 2
+  ccam release 2 --delete
+  ccam release api --force";
+
+pub const PRUNE: &str = "\
+Removes empty lane directories that hold no account and have no running Claude Code sessions.
+
+Examples:
+  ccam prune";
+
+pub const SESSIONS: &str =
+    "Lists the main login and every lane: the account each holds and its running Claude Code sessions (status,
+folder, session id, pid), read with `claude agents --json`.
+
+Examples:
+  ccam sessions";

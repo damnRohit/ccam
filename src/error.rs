@@ -70,6 +70,22 @@ pub enum Error {
     #[error("{}: {reason}", path.display())]
     Malformed { path: PathBuf, reason: &'static str },
 
+    #[error(
+        "'{name}' is in lane {lane}; using it here too would log one of them out. Move that lane to another account (ccam move {lane} <other>), or close its sessions and run: ccam release {lane}"
+    )]
+    InLane { name: AccountName, lane: String },
+
+    /// `ccam login` could not save the login it made; the message says why and what to do.
+    #[error("{0}")]
+    Login(String),
+
+    #[error("could not confirm which account you signed in to ({0}); nothing was saved. Retry when online")]
+    LoginUnconfirmed(String),
+
+    /// A lane command that cannot be done as asked; the message says why and what to run instead.
+    #[error("{0}")]
+    Lane(String),
+
     #[error("cannot determine the home directory")]
     NoHome,
 
@@ -111,8 +127,11 @@ impl Error {
             | Self::LiveUnreadable
             | Self::GenerationConflict(_)
             | Self::LoginInUse(_)
-            | Self::InUseElsewhere { .. } => exit::USAGE,
-            Self::LiveUnverified { .. } | Self::Api(_) => exit::NETWORK,
+            | Self::InUseElsewhere { .. }
+            | Self::InLane { .. }
+            | Self::Lane(_)
+            | Self::Login(_) => exit::USAGE,
+            Self::LiveUnverified { .. } | Self::LoginUnconfirmed(_) | Self::Api(_) => exit::NETWORK,
             Self::LockTimeout { .. }
             | Self::LockLost(_)
             | Self::Io { .. }

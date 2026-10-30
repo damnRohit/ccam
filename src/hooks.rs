@@ -47,9 +47,31 @@ const AUTO_TRIGGERS: [Trigger; 2] = [
 /// Installs the hooks. `config_dir` is baked into the arguments because Claude Code can strip
 /// `CLAUDE_CONFIG_DIR` from hook environments (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`).
 pub fn install(settings: &Path, exe: &Path, config_dir: Option<&str>, auto: bool) -> Result<bool> {
+    write_hooks(settings, None, exe, config_dir, auto)
+}
+
+/// Makes `settings` a copy of `source` with ccam's hooks for `config_dir` in place of the source's own, for a lane.
+/// The file is replaced only when that changes it, since running sessions watch it. A missing `source` leaves the
+/// rest of `settings` as it is.
+pub fn install_copy(source: &Path, settings: &Path, exe: &Path, config_dir: Option<&str>) -> Result<bool> {
+    let base = match jsonio::read(source)? {
+        None => None,
+        Some(Value::Object(doc)) => Some(doc),
+        Some(_) => return Err(Error::Malformed { path: source.into(), reason: "top level is not a JSON object" }),
+    };
+    write_hooks(settings, base, exe, config_dir, false)
+}
+
+fn write_hooks(
+    settings: &Path,
+    base: Option<Map<String, Value>>,
+    exe: &Path,
+    config_dir: Option<&str>,
+    auto: bool,
+) -> Result<bool> {
     let exe = exe.to_string_lossy();
     let auto_triggers: &[Trigger] = if auto { &AUTO_TRIGGERS } else { &[] };
-    edit_hooks(settings, |hooks| {
+    edit_hooks(settings, base, |hooks| {
         remove_ccam_entries(hooks);
         for trigger in TRIGGERS.iter().chain(auto_triggers) {
             let mut args = vec!["hook".to_string(), trigger.arg.to_string()];
@@ -79,7 +101,7 @@ pub fn uninstall(settings: &Path) -> Result<bool> {
     if !settings.exists() {
         return Ok(false);
     }
-    edit_hooks(settings, remove_ccam_entries)
+    edit_hooks(settings, None, remove_ccam_entries)
 }
 
 /// Runs a fired hook. Returns the JSON to print, if the event expects any.
@@ -95,6 +117,16 @@ pub fn handle(event: Event, input: &Value, manager: &Manager) -> Result<Option<V
     if let Some(path) = signal {
         crate::autorun::mark(path).map_err(|e| crate::error::Error::io(path, e))?;
         return Ok(None);
+    }
+
+    if event == Event::SessionStart && manager.side().lane.is_some() {
+        let text = |key: &str| input[key].as_str().unwrap_or("?").to_string();
+        manager.log(&format!("session {} {} in {}", text("session_id"), text("source"), text("cwd")));
+        // Sessions T3 Code starts never pass through `ccam run`, so this is where their lane picks up main's edits.
+        match refresh_lane(manager) {
+            Ok(()) => manager.log("settings refreshed"),
+            Err(e) => manager.log(&format!("settings not refreshed: {e}")),
+        }
     }
 
     let credentials = &manager.paths().credentials_file;
@@ -119,6 +151,15 @@ pub fn handle(event: Event, input: &Value, manager: &Manager) -> Result<Option<V
     }))
 }
 
+fn refresh_lane(manager: &Manager) -> Result<()> {
+    let lane = manager.paths();
+    let home = std::env::home_dir().ok_or(Error::NoHome)?;
+    let main = crate::lane::main_of(lane, &home)
+        .ok_or_else(|| Error::Lane(format!("{} is not inside a main config home", lane.config_home.display())))?;
+    let exe = std::env::current_exe().map_err(|e| Error::Lane(format!("cannot locate ccam: {e}")))?;
+    crate::lane::refresh_copies(&main, lane, &exe)
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -126,8 +167,15 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn edit_hooks(settings: &Path, edit: impl FnOnce(&mut Map<String, Value>)) -> Result<bool> {
+fn edit_hooks(
+    settings: &Path,
+    base: Option<Map<String, Value>>,
+    edit: impl FnOnce(&mut Map<String, Value>),
+) -> Result<bool> {
     jsonio::edit_object(settings, Style::Pretty, false, |doc| {
+        if let Some(base) = base {
+            *doc = base;
+        }
         let mut hooks = match doc.shift_remove("hooks") {
             Some(Value::Object(map)) => map,
             None | Some(Value::Null) => Map::new(),

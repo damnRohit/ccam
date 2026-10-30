@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::login::UnixMillis;
 use crate::manager::{LiveState, Manager};
 use crate::name::AccountName;
+use crate::store::LoginStore;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Window {
@@ -33,7 +34,12 @@ pub enum CardState {
 pub struct Card {
     pub name: AccountName,
     pub current: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
     pub plan: Option<String>,
+    /// The account's email address. Filled only for `ccam usage --email`, the one place ccam shows emails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     #[serde(flatten)]
     pub state: CardState,
 }
@@ -70,6 +76,19 @@ pub fn collect(manager: &Manager, refresh: bool) -> Result<Vec<Card>> {
     };
     let now = UnixMillis::now();
 
+    let mut lane_logins: Vec<(AccountName, String, crate::login::OAuthLogin)> = Vec::new();
+    for id in crate::lane::all(manager.paths()) {
+        if let Ok(paths) = crate::lane::paths(manager.paths(), &id)
+            && let Ok(Some(raw)) = crate::store::FileStore::new(paths.credentials_file).read()
+            && let Ok(login) = crate::login::OAuthLogin::parse(raw)
+            && let Ok(Some(oauth_account)) = crate::config::GlobalConfig::new(paths.global_config).read_oauth_account()
+            && let Some(identity) = crate::login::Identity::from_oauth_account(&oauth_account)
+            && let Some(account) = overview.listing.find(&identity)
+        {
+            lane_logins.push((account.name.clone(), id.to_string(), login));
+        }
+    }
+
     Ok(std::thread::scope(|scope| {
         let workers: Vec<_> = overview
             .listing
@@ -77,10 +96,12 @@ pub fn collect(manager: &Manager, refresh: bool) -> Result<Vec<Card>> {
             .iter()
             .map(|account| {
                 let current = live_name.as_ref() == Some(&account.name);
-                let login = if current {
-                    live_login.clone().unwrap_or_else(|| account.login.clone())
+                let (login, in_lane) = if current {
+                    (live_login.clone().unwrap_or_else(|| account.login.clone()), None)
+                } else if let Some((_, lane_id, login)) = lane_logins.iter().find(|(n, _, _)| n == &account.name) {
+                    (login.clone(), Some(lane_id.clone()))
                 } else {
-                    account.login.clone()
+                    (account.login.clone(), None)
                 };
                 scope.spawn(move || {
                     let token = if login.usable_at(now) {
@@ -88,6 +109,10 @@ pub fn collect(manager: &Manager, refresh: bool) -> Result<Vec<Card>> {
                     } else if current {
                         Err(CardState::Error {
                             message: "access token expired, send any message in Claude to renew it".into(),
+                        })
+                    } else if let Some(lane_id) = &in_lane {
+                        Err(CardState::Error {
+                            message: format!("access token expired, send any message in lane {lane_id} to renew it"),
                         })
                     } else if !refresh {
                         Err(CardState::Stale)
@@ -97,15 +122,17 @@ pub fn collect(manager: &Manager, refresh: bool) -> Result<Vec<Card>> {
                             .map(|refreshed| refreshed.login.access_token().to_string())
                             .map_err(|e| CardState::Error { message: e.to_string() })
                     };
-                    let state = match token.map(|t| manager.client().usage(&t)) {
+                    let state = match token.as_deref().map(|t| manager.client().usage(t)) {
                         Ok(Ok(body)) => CardState::Ok { windows: parse_windows(&body) },
                         Ok(Err(e)) => CardState::Error { message: e.to_string() },
-                        Err(state) => state,
+                        Err(state) => state.clone(),
                     };
                     Card {
                         name: account.name.clone(),
                         current,
+                        lane: in_lane,
                         plan: login.subscription_type().map(str::to_string),
+                        email: None,
                         state,
                     }
                 })
@@ -183,10 +210,16 @@ pub fn render(cards: &[Card], now: Timestamp, color: bool) -> String {
 const SIDES: usize = 4;
 
 fn title(card: &Card, p: &Palette) -> (String, String) {
-    let marker = if card.current { p.paint(ansi::CYAN, "●") } else { p.paint(ansi::GREY, "○") };
+    let marker =
+        if card.current || card.lane.is_some() { p.paint(ansi::CYAN, "●") } else { p.paint(ansi::GREY, "○") };
     let mut title = format!("{marker} {}", p.paint(ansi::BOLD, card.name.as_str()));
+    if let Some(email) = &card.email {
+        title.push_str(&format!("  {email}"));
+    }
     if card.current {
         title.push_str(&p.paint(ansi::CYAN, "  current"));
+    } else if let Some(lane) = &card.lane {
+        title.push_str(&p.paint(ansi::CYAN, &format!("  lane {lane}")));
     }
     let tail = match &card.plan {
         Some(plan) => format!(" {} ─╮", p.paint(ansi::DIM, plan)),
@@ -302,7 +335,9 @@ mod tests {
             Card {
                 name: name("main"),
                 current: true,
+                lane: None,
                 plan: Some("pro".into()),
+                email: None,
                 state: CardState::Ok {
                     windows: vec![
                         Window { label: "5 hour".into(), percent: 27.0, resets_at: Some(ts("2026-09-17T16:04:00Z")) },
@@ -310,11 +345,20 @@ mod tests {
                     ],
                 },
             },
-            Card { name: name("second"), current: false, plan: Some("pro".into()), state: CardState::Stale },
+            Card {
+                name: name("second"),
+                current: false,
+                lane: None,
+                plan: Some("pro".into()),
+                email: None,
+                state: CardState::Stale,
+            },
             Card {
                 name: name("third"),
                 current: false,
+                lane: None,
                 plan: None,
+                email: None,
                 state: CardState::Error { message: "timed out".into() },
             },
         ];
@@ -344,16 +388,35 @@ mod tests {
             Card {
                 name: name(&"n".repeat(64)),
                 current: true,
+                lane: None,
                 plan: Some("max".into()),
+                email: None,
                 state: CardState::Ok { windows: vec![window] },
             },
-            Card { name: name("b"), current: false, plan: None, state: CardState::Stale },
+            Card { name: name("b"), current: false, lane: None, plan: None, email: None, state: CardState::Stale },
         ];
 
         let out = render(&cards, now, false);
         let widths: std::collections::BTreeSet<_> =
             out.lines().filter(|l| !l.is_empty()).map(|l| l.chars().count()).collect();
         assert_eq!(widths.len(), 1, "{out}");
+    }
+
+    #[test]
+    fn an_email_shows_after_the_name_only_when_the_card_has_one() {
+        let now = ts("2026-09-17T12:00:00Z");
+        let card = |email: Option<&str>| Card {
+            name: name("work"),
+            current: false,
+            lane: None,
+            plan: None,
+            email: email.map(str::to_string),
+            state: CardState::Stale,
+        };
+
+        let first_line = |c: Card| render(&[c], now, false).lines().next().unwrap().to_string();
+        assert!(first_line(card(Some("me@example.test"))).contains("work  me@example.test"));
+        assert!(!first_line(card(None)).contains('@'));
     }
 
     #[test]
@@ -368,7 +431,9 @@ mod tests {
         let card = |percent| Card {
             name: name("a"),
             current: false,
+            lane: None,
             plan: None,
+            email: None,
             state: CardState::Ok { windows: vec![Window { label: "5 hour".into(), percent, resets_at: None }] },
         };
         let now = ts("2026-09-17T12:00:00Z");
@@ -379,8 +444,14 @@ mod tests {
 
     #[test]
     fn json_output_is_tagged_by_status() {
-        let card =
-            Card { name: name("a"), current: false, plan: None, state: CardState::Error { message: "x".into() } };
+        let card = Card {
+            name: name("a"),
+            current: false,
+            lane: None,
+            plan: None,
+            email: None,
+            state: CardState::Error { message: "x".into() },
+        };
         assert_eq!(
             serde_json::to_value(&card).unwrap(),
             json!({"name": "a", "current": false, "plan": null, "status": "error", "message": "x"})

@@ -35,10 +35,7 @@ pub fn read(path: &Path) -> Result<Option<Value>> {
     }
 }
 
-/// Writes JSON through a uniquely named temp file and a rename, so readers see the old or the new file, never
-/// a torn one, even with several writers.
-///
-/// A new file is created owner-only on Unix when `private` is set. An existing file keeps its permissions.
+/// Writes JSON atomically, as [`write_atomic_bytes`] does.
 pub fn write_atomic(path: &Path, value: &Value, style: Style, private: bool) -> Result<()> {
     let mut bytes = match style {
         Style::Compact => serde_json::to_vec(value),
@@ -48,9 +45,16 @@ pub fn write_atomic(path: &Path, value: &Value, style: Style, private: bool) -> 
     if matches!(style, Style::Pretty) {
         bytes.push(b'\n');
     }
+    write_atomic_bytes(path, &bytes, private)
+}
 
+/// Writes through a uniquely named temp file and a rename, so readers see the old or the new file, never a torn
+/// one, even with several writers.
+///
+/// A new file is created owner-only on Unix when `private` is set. An existing file keeps its permissions.
+pub fn write_atomic_bytes(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     let tmp = temp_path(path);
-    let result = write_synced(&tmp, &bytes, path, private)
+    let result = write_synced(&tmp, bytes, path, private)
         .map_err(|e| Error::io(&tmp, e))
         .and_then(|()| with_sharing_retry(|| fs::rename(&tmp, path)).map_err(|e| Error::io(path, e)));
     if result.is_err() {

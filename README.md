@@ -35,6 +35,7 @@ $ ccam usage
 - [Windows and WSL together](#windows-and-wsl-together)
 - [Starting all 5-hour windows at once](#starting-all-5-hour-windows-at-once)
 - [Switching automatically before the limit](#switching-automatically-before-the-limit)
+- [Using lanes in T3 Code](#using-lanes-in-t3-code)
 - [How it works](#how-it-works)
 - [When something goes wrong](#when-something-goes-wrong)
 - [Known limitations](#known-limitations)
@@ -74,6 +75,8 @@ Know the way back before you start: your login lives in `~/.claude/.credentials.
    ccam to work
    ```
 
+To add an account without touching your live login, skip step 2 and run `ccam login personal` instead. It opens Claude Code's browser sign-in in a throwaway folder and saves the result as `personal`. Your main login, lanes and open sessions stay as they are.
+
 Inside a Claude Code session, prefix commands with `!` (for example `! ccam to personal`). They run locally, so they work even after the session has hit its usage limit. A running session uses the new account from its next message.
 
 ## Commands
@@ -83,7 +86,8 @@ Inside a Claude Code session, prefix commands with `!` (for example `! ccam to p
 | Command | What it does |
 |---|---|
 | `ccam list` | Saved accounts. `*` marks the logged-in one; `in use on ...` marks one another install is using |
-| `ccam save <name>` | Save the logged-in account |
+| `ccam save <name> [--lane <id>]` | Save the logged-in account (or the account logged in inside a lane) |
+| `ccam login <name>` | Sign in to a new account in the browser and save it as `<name>`, without touching the main login, lanes or open sessions. For an account that is already saved, refreshes its saved login if it is in use nowhere |
 | `ccam rename <old> <new>` | Rename a saved account |
 | `ccam remove <name>` | Forget a saved account (the live login is not touched) |
 | `ccam to <name>` | Switch Claude Code to a saved account |
@@ -92,7 +96,13 @@ Inside a Claude Code session, prefix commands with `!` (for example `! ccam to p
 | `ccam to <name> --continue` | Switch, then continue the latest conversation |
 | `ccam to <name> --restart` | Switch and reopen the conversation in a new Windows Terminal tab (from inside Claude Code) |
 | `ccam to <name> --force` | If your other install (Windows or WSL) uses the account, move that install to the best free account first |
-| `ccam usage [--refresh] [--json]` | 5-hour, weekly and per-model usage for every account |
+| `ccam run <name> [claude args]` | Open Claude Code in a lane on that account: other terminals and `ccam to` leave it alone, so its prompt cache stays warm. History and memory are shared. `--lane <id>` joins or names a lane |
+| `ccam lane <name> [--lane <id>]` | Check a saved account out into a lane without opening Claude Code, e.g. for T3 Code. Reuses the lane that already holds the account; `--lane <id>` uses or names a lane. Adds the lane to T3 Code's model picker (see [Using lanes in T3 Code](#using-lanes-in-t3-code)) |
+| `ccam move <lane> <name>` | Move a lane, and every session in it, to another account (asks first; `--yes` for scripts) |
+| `ccam release <lane> [--force] [--delete]` | Give a lane's account back so any terminal can use it (`--delete` removes the lane folder) |
+| `ccam prune` | Remove empty lane directories that hold no account and have no running sessions |
+| `ccam sessions` | Running sessions per lane and the account each lane holds |
+| `ccam usage [--refresh] [--json] [--email]` | 5-hour, weekly and per-model usage for every account. `--email` also shows each account's email address |
 | `ccam start [--refresh]` | Start the 5-hour window on every account with one tiny message each |
 | `ccam sync` | Save the newest login of the logged-in account (the hooks normally do this) |
 | `ccam setup [--auto]` / `ccam uninstall` | Add or remove the hooks |
@@ -148,6 +158,34 @@ ccam auto stop
 It is built to run for days. With Claude idle it checks usage once every 30 minutes, more often only as usage nears the threshold, reads the other accounts only once the live one is close, and backs off for 15 minutes or more on a rate limit. Switches are at least 15 minutes apart. If every account is nearly full, it says which one reopens first and waits.
 
 Read [Terms of service](#terms-of-service) before using this. `--notify` keeps you deciding each switch.
+
+## Using lanes in T3 Code
+
+T3 Code starts Claude Code itself, so `ccam run` cannot sit in front of it. A lane shows up in T3 as an instance instead.
+
+```sh
+ccam lane work
+```
+
+This creates a lane (or reuses the one already holding `work`), checks the account out without opening Claude, and adds a T3 instance named `ccam-lane-<id>` and labelled "Claude · lane <id> · work" to `~/.t3/userdata/settings.json` (or `$T3CODE_HOME/userdata/settings.json`). T3 reloads that file within a second. ccam prints:
+
+```
+Lane 1 holds 'work'.
+T3 Code: lane 1 is in the model picker as 'Claude · lane 1 · work'.
+```
+
+If T3 is not installed, ccam prints `T3 Code not found; skipped adding the lane to T3.` and the lane still works. If the T3 file cannot be updated, ccam prints `ccam: could not update T3 Code: ...` on stderr; the lane command still succeeded, and the next lane command retries. `ccam run`, `move`, `release` and `prune` update T3 too, without the extra output.
+
+Lane ids with a `.`, `_` or `@`, or very long ones, get a sanitised instance id with `_` and an 8-character hash at the end (T3's id rule); the label always shows the real lane id.
+
+- **One thread, one account.** In T3, pick the lane's instance in the model picker for each thread. Threads on different instances run on different accounts at the same time.
+- **Child agents stay in the lane.** A Claude child agent started with `delegate_task` or `create_threads` without a target uses its parent's instance. Codex and Antigravity threads use their own logins.
+- **When an account runs out**, run `ccam move <lane> <other>`. Every thread in the lane keeps its conversation and rebuilds its prompt cache once. Switching a thread to another instance inside T3 is different: it starts a fresh session that sees only about 16k tokens of the old history.
+- **The lane follows your main config.** The lane's session-start hook refreshes its copies of `settings.json`, `CLAUDE.md` and `keybindings.json` (writing only what changed), so edits reach the next session.
+- **The instance follows the lane.** `ccam move` relabels it, `ccam release` disables it, and `ccam release --delete` and `ccam prune` remove it with the lane. A lane is enabled only while it holds a saved account. ccam sets only `driver`, `displayName`, `enabled` and `config.homePath` of its own `ccam-lane-*` entries and keeps everything else in `settings.json`.
+- **Memory.** T3 threads run in full-access mode, which should not ask before memory writes. This is not yet tested in T3 (anthropics/claude-code#98044); step 1 of the manual test in [docs/MANUAL-TESTS.md](docs/MANUAL-TESTS.md) checks it.
+
+If T3 does not show the lane, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## How it works
 

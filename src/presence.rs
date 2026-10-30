@@ -32,6 +32,8 @@ pub struct Side {
     pub platform: Platform,
     /// This side's ccam, so another side can run it.
     pub exe: PathBuf,
+    /// The lane this install is, when it is a `ccam run` lane rather than a main config home.
+    pub lane: Option<String>,
     key: String,
 }
 
@@ -56,7 +58,8 @@ impl Side {
         };
         let id = format!("{}|{distro}|{}", std::env::consts::OS, credentials_file.display());
         let key = hex::encode(&Sha256::digest(id.as_bytes())[..6]);
-        Self { platform, exe, key }
+        let lane = credentials_file.parent().and_then(crate::lane::lane_of);
+        Self { platform, exe, lane, key }
     }
 
     /// A short stable name for this side, used for its files in the shared vault.
@@ -65,6 +68,9 @@ impl Side {
     }
 
     pub fn label(&self) -> String {
+        if let Some(lane) = &self.lane {
+            return format!("lane {lane}");
+        }
         match &self.platform {
             Platform::Windows => "Windows".into(),
             Platform::Wsl { distro } => format!("WSL ({distro})"),
@@ -74,6 +80,9 @@ impl Side {
 
     /// How to run this side's ccam from `here`, when that is possible from one machine.
     pub fn command_from(&self, here: &Side) -> Option<Command> {
+        if self.lane.is_some() {
+            return None;
+        }
         match (&self.platform, &here.platform) {
             (Platform::Wsl { distro }, Platform::Windows | Platform::Wsl { .. }) => {
                 let mut cmd = Command::new("wsl.exe");
@@ -96,9 +105,10 @@ pub struct Mark {
 
 pub fn record(vault_dir: &Path, side: &Side, live: Option<&Identity>) -> Result<()> {
     // A record with this side's platform and ccam but another key is this side's own, left from before its key
-    // changed (a new key scheme or config dir). Left alone it would block this side's own account forever.
+    // changed (a new key scheme or config dir). Left alone it would block this side's own account forever. Lanes
+    // share platform and ccam with their main install but are installs of their own.
     for old in others(vault_dir, side) {
-        if old.side.platform == side.platform && old.side.exe == side.exe {
+        if old.side.platform == side.platform && old.side.exe == side.exe && old.side.lane == side.lane {
             let _ = std::fs::remove_file(&old.file);
         }
     }
@@ -123,6 +133,7 @@ pub fn record(vault_dir: &Path, side: &Side, live: Option<&Identity>) -> Result<
         "distro": distro,
         "exe": side.exe,
         "key": side.key,
+        "lane": side.lane,
     });
     // Most syncs change nothing, and every write goes over drvfs from WSL.
     if jsonio::read(&file).ok().flatten().as_ref() == Some(&doc) {
@@ -154,7 +165,12 @@ fn parse(doc: &Value, file: PathBuf) -> Option<Mark> {
         _ => Platform::Other,
     };
     Some(Mark {
-        side: Side { platform, exe: PathBuf::from(text("exe")?), key: text("key")?.to_string() },
+        side: Side {
+            platform,
+            exe: PathBuf::from(text("exe")?),
+            lane: text("lane").map(str::to_string),
+            key: text("key")?.to_string(),
+        },
         identity: Identity {
             account_uuid: text("accountUuid")?.to_string(),
             organization_uuid: text("organizationUuid").map(str::to_string),
@@ -231,6 +247,23 @@ mod tests {
 
         assert_eq!(others(dir.path(), &debian)[0].identity, identity("A"));
         assert_eq!(others(dir.path(), &wsl())[0].identity, identity("B"));
+    }
+
+    #[test]
+    fn a_lane_and_its_main_install_keep_separate_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = Side::new(Platform::Windows, r"C:\ccam.exe".into(), Path::new("/h/.claude/.credentials.json"));
+        let lane =
+            Side::new(Platform::Windows, r"C:\ccam.exe".into(), Path::new("/h/.claude/ccam/lanes/2/.credentials.json"));
+        record(dir.path(), &main, Some(&identity("A"))).unwrap();
+        record(dir.path(), &lane, Some(&identity("B"))).unwrap();
+        record(dir.path(), &main, Some(&identity("A"))).unwrap();
+
+        let seen_from_main = others(dir.path(), &main);
+        assert_eq!(seen_from_main.len(), 1);
+        assert_eq!(seen_from_main[0].side.label(), "lane 2");
+        assert!(seen_from_main[0].side.command_from(&main).is_none());
+        assert_eq!(others(dir.path(), &lane)[0].identity, identity("A"));
     }
 
     #[test]
