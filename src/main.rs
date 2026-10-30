@@ -103,6 +103,9 @@ enum Command {
         /// Also show each account's email address (shown only here, never logged)
         #[arg(long)]
         email: bool,
+        /// Also show plan, billing, status, trial, extra usage and guest passes for each account (one or two extra requests per account; never logged)
+        #[arg(long)]
+        info: bool,
     },
     /// Copy the live login into its saved account when it is newer
     #[command(after_long_help = help::SYNC)]
@@ -347,7 +350,7 @@ fn run(command: Command) -> Result<ExitCode> {
                 println!("{:<24} {}", report.name, ccam::warmup::describe(&report.outcome));
             }
         }
-        Command::Usage { refresh, json, email } => show_usage(&manager, refresh, json, email)?,
+        Command::Usage { refresh, json, email, info } => show_usage(&manager, refresh, json, email, info)?,
         Command::Sync { quiet } => {
             let outcome = manager.sync(Network::Allowed)?;
             if !quiet {
@@ -579,10 +582,10 @@ fn best_of(manager: &Manager, free: &[&AccountName]) -> Option<AccountName> {
     if let [only] = free {
         return Some((*only).clone());
     }
-    let cards = usage::collect(manager, false).unwrap_or_default();
+    let cards = usage::collect(manager, false, false).unwrap_or_default();
     let level = |name: &AccountName| {
         cards.iter().find(|c| &c.name == name).and_then(|c| match &c.state {
-            usage::CardState::Ok { windows } => {
+            usage::CardState::Ok { windows, .. } => {
                 windows.iter().filter(|w| w.label == "5 hour" || w.label == "7 day").map(|w| w.percent).reduce(f64::max)
             }
             _ => None,
@@ -972,9 +975,9 @@ fn claude_version() -> Result<String> {
     }
 }
 
-fn show_usage(manager: &Manager, refresh: bool, as_json: bool, email: bool) -> Result<()> {
-    let mut cards = usage::collect(manager, refresh)?;
-    if email {
+fn show_usage(manager: &Manager, refresh: bool, as_json: bool, email: bool, info: bool) -> Result<()> {
+    let mut cards = usage::collect(manager, refresh, info)?;
+    if email || info {
         let listing = manager.overview()?.listing;
         for card in &mut cards {
             let account = listing.get(&card.name);

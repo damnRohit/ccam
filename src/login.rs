@@ -42,6 +42,7 @@ pub struct OAuthLogin {
     expires_at: UnixMillis,
     session_expires_at: Option<i64>,
     subscription_type: Option<String>,
+    rate_limit_tier: Option<String>,
     raw: Map<String, Value>,
 }
 
@@ -66,6 +67,7 @@ impl OAuthLogin {
                 .ok_or("login has no expiresAt")?,
             session_expires_at: raw.get("refreshTokenExpiresAt").and_then(Value::as_i64),
             subscription_type: text("subscriptionType"),
+            rate_limit_tier: text("rateLimitTier"),
             raw,
         })
     }
@@ -84,6 +86,10 @@ impl OAuthLogin {
 
     pub fn subscription_type(&self) -> Option<&str> {
         self.subscription_type.as_deref()
+    }
+
+    pub fn rate_limit_tier(&self) -> Option<&str> {
+        self.rate_limit_tier.as_deref()
     }
 
     /// Access tokens this close to expiry count as expired, so a request never races the deadline.
@@ -211,6 +217,14 @@ mod tests {
             ("a2", "r2", UnixMillis::from_millis(5))
         );
         assert_eq!(refreshed.to_value()["scopes"], json!(["x"]));
+    }
+
+    #[test]
+    fn the_plan_and_its_rate_limit_tier_are_read_and_kept_verbatim() {
+        let value = json!({"accessToken": "a", "refreshToken": "r", "expiresAt": 1, "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x", "zeta": 1});
+        let login = OAuthLogin::parse(value.clone()).unwrap();
+        assert_eq!((login.subscription_type(), login.rate_limit_tier()), (Some("max"), Some("default_claude_max_20x")));
+        assert_eq!(login.to_value(), value);
     }
 
     #[test]

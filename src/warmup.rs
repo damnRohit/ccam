@@ -296,6 +296,12 @@ mod tests {
             let resets_at = windows.get(access_token).cloned().flatten();
             Ok(json!({"five_hour": {"utilization": 0, "resets_at": resets_at}}))
         }
+        fn profile(&self, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!("start never reads profiles")
+        }
+        fn referral_eligibility(&self, _: &str, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!("start never reads guest passes")
+        }
     }
 
     /// Records sends; each send makes a window appear for that token.

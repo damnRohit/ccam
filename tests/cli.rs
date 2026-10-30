@@ -1,13 +1,14 @@
 //! End-to-end tests of the built binary against a temporary home directory and the file credential store.
 //!
 //! No test reaches a real network: `CCAM_API_BASE` points at an unroutable address, and the fake logins are
-//! shaped so that no command needs to confirm ownership online. `ccam login` must confirm, so its tests point
-//! `CCAM_API_BASE` at `profile_server` on 127.0.0.1 instead.
+//! shaped so that no command needs to confirm ownership online. `ccam login` must confirm and `ccam usage` with a
+//! usable token reads usage, so those tests point `CCAM_API_BASE` at `fake_api` on 127.0.0.1 instead.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -675,36 +676,72 @@ fn lanes_refuse_a_claude_code_too_old_to_share_history_safely() {
     assert!(!home.claude().join("ccam").join("lanes").exists());
 }
 
-/// Answers the profile endpoint with the account named by the bearer token, `at-<uuid>-<n>`, as Anthropic does
-/// for a token it issued. Returns the base URL for `CCAM_API_BASE`.
-fn profile_server() -> String {
+/// A local stand-in for Anthropic's API. Every request carries a bearer token `at-<uuid>-<n>` naming its
+/// account, as Anthropic's tokens belong to one account. The fixtures hold `SECRET` in every identifier, code and
+/// link that ccam must never show.
+struct FakeApi {
+    base: String,
+    /// `GET <path>` per request, with ` org=<x-organization-uuid>` when the header was sent.
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeApi {
+    fn requests_since(&self, start: usize) -> Vec<String> {
+        let mut requests = self.requests.lock().unwrap()[start..].to_vec();
+        requests.sort();
+        requests
+    }
+
+    fn count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+/// Serves the profile with the token's account uuid, usage with extra usage on for account `B` only, and guest
+/// pass eligibility.
+fn fake_api() -> FakeApi {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&requests);
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
             let mut reader = BufReader::new(&stream);
             let mut request = String::new();
-            let mut uuid = None;
+            let (mut uuid, mut org) = (None, None);
             for _ in 0..64 {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
                     break;
                 }
-                if let Some((key, value)) = line.split_once(':')
-                    && key.eq_ignore_ascii_case("authorization")
-                {
-                    uuid = value
-                        .trim()
-                        .strip_prefix("Bearer at-")
-                        .and_then(|t| t.rsplit_once('-'))
-                        .map(|(u, _)| u.to_string());
-                } else if request.is_empty() {
-                    request = line;
+                match line.split_once(':') {
+                    Some((key, value)) if key.eq_ignore_ascii_case("authorization") => {
+                        uuid = value
+                            .trim()
+                            .strip_prefix("Bearer at-")
+                            .and_then(|t| t.rsplit_once('-'))
+                            .map(|(u, _)| u.to_string());
+                    }
+                    Some((key, value)) if key.eq_ignore_ascii_case("x-organization-uuid") => {
+                        org = Some(value.trim().to_string());
+                    }
+                    _ if request.is_empty() => request = line,
+                    _ => {}
                 }
             }
-            let (status, body) = match uuid {
-                Some(uuid) if request.starts_with("GET /api/oauth/profile ") => {
-                    ("200 OK", json!({"account": {"uuid": uuid}}).to_string())
+            let target = request.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+            log.lock().unwrap().push(match &org {
+                Some(org) => format!("{target} org={org}"),
+                None => target.clone(),
+            });
+            let (status, body) = match (uuid, target.as_str()) {
+                (Some(uuid), "GET /api/oauth/profile") => ("200 OK", fake_profile(&uuid).to_string()),
+                (Some(uuid), "GET /api/oauth/usage") => ("200 OK", fake_usage(&uuid).to_string()),
+                (Some(_), t)
+                    if t.starts_with("GET /api/oauth/organizations/")
+                        && t.ends_with("/referral/eligibility?campaign=claude_code_guest_pass") =>
+                {
+                    ("200 OK", fake_eligibility(2).to_string())
                 }
                 _ => ("404 Not Found", "{}".to_string()),
             };
@@ -715,7 +752,159 @@ fn profile_server() -> String {
             );
         }
     });
-    base
+    FakeApi { base, requests }
+}
+
+fn fake_profile(uuid: &str) -> Value {
+    json!({
+        "account": {
+            "uuid": uuid, "email": "SECRET@example.test", "full_name": "Test Person", "display_name": "Test",
+            "created_at": "2024-03-01T10:00:00.123456Z", "has_claude_max": false, "has_claude_pro": true,
+        },
+        "organization": {
+            "uuid": "SECRET-org", "name": "Test Org", "organization_type": "claude_pro",
+            "billing_type": "stripe_subscription", "rate_limit_tier": "default_claude_ai", "seat_tier": null,
+            "has_extra_usage_enabled": uuid == "B", "subscription_status": "active",
+            "subscription_created_at": "2024-03-01T10:00:11.000001Z", "claude_code_trial_ends_at": null,
+            "payment_auth_hosted_invoice_url": "https://invoice.example.test/SECRET-invoice",
+        },
+        "application": {"uuid": "SECRET-app", "name": "Claude Code", "slug": "claude-code"},
+    })
+}
+
+fn fake_usage(uuid: &str) -> Value {
+    let extra_usage = match uuid {
+        "B" => {
+            json!({"is_enabled": true, "monthly_limit": 5000, "used_credits": 1240, "currency": "USD", "decimal_places": 2})
+        }
+        _ => {
+            json!({"is_enabled": false, "monthly_limit": null, "used_credits": 0, "currency": "USD", "decimal_places": 2, "disabled_reason": "out_of_credits"})
+        }
+    };
+    json!({
+        "five_hour": {"utilization": 27.0, "resets_at": null},
+        "seven_day": {"utilization": 46.0, "resets_at": null},
+        "extra_usage": extra_usage,
+        "wattle_ember": {"label": null, "used_dollars": 3.2, "limit_dollars": 10, "resets_at": null},
+        "iguana_necktie": {"utilization": 1.5, "used_dollars": 0.3, "limit_dollars": 20},
+        "seven_day_breakdown": {"rows": [{"key": "k", "percent": 4}]},
+    })
+}
+
+fn fake_eligibility(remaining: i64) -> Value {
+    json!({
+        "eligible": true, "remaining_passes": remaining, "limit": 3, "degraded": false,
+        "referrer_reward": {"amount_minor_units": 1000, "currency": "USD"},
+        "referral_code_details": {"code": "SECRET-CODE", "campaign": "claude_code_guest_pass", "referral_link": "https://claude.ai/r/SECRET-LINK"},
+        "share_link": "https://claude.ai/s/SECRET-SHARE", "terms_url": "https://example.test/SECRET-terms",
+    })
+}
+
+#[test]
+fn usage_info_shows_plan_billing_and_guest_passes_and_plain_usage_requests_only_usage() {
+    const ORG_A: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+    const ORG_B: &str = "bbbbbbbb-0000-4000-8000-000000000002";
+    const USABLE: i64 = 4_102_444_800_000;
+    let home = Home::new();
+    let api = fake_api();
+    let ccam = |args: &[&str]| {
+        let mut cmd = home.ccam(args);
+        cmd.env("CCAM_API_BASE", &api.base);
+        String::from_utf8(cmd.assert().success().get_output().stdout.clone()).unwrap()
+    };
+    for (uuid, org, plan, tier) in
+        [("A", ORG_A, "pro", "default_claude_ai"), ("B", ORG_B, "max", "default_claude_max_20x")]
+    {
+        home.log_in(uuid, USABLE);
+        let mut creds = home.read(".claude/.credentials.json");
+        creds["claudeAiOauth"]["subscriptionType"] = plan.into();
+        creds["claudeAiOauth"]["rateLimitTier"] = tier.into();
+        fs::write(home.claude().join(".credentials.json"), creds.to_string()).unwrap();
+        let mut config = home.read(".claude.json");
+        config["oauthAccount"]["organizationUuid"] = org.into();
+        config["oauthAccount"]["emailAddress"] = format!("test-{uuid}@example.test").into();
+        fs::write(home.path().join(".claude.json"), config.to_string()).unwrap();
+        ccam(&["save", &uuid.to_ascii_lowercase()]);
+    }
+    let mut config = home.read(".claude.json");
+    let mut cached = fake_eligibility(1);
+    cached["timestamp"] = (jiff::Timestamp::now().as_millisecond() - 3 * 3_600_000 - 60_000).into();
+    config["passesEligibilityCache"] = json!({ORG_A: cached});
+    fs::write(home.path().join(".claude.json"), config.to_string()).unwrap();
+    let usage_twice = ["GET /api/oauth/usage", "GET /api/oauth/usage"];
+
+    let start = api.count();
+    let plain = ccam(&["usage"]);
+    assert_eq!(api.requests_since(start), usage_twice, "plain usage makes the requests it always made");
+    assert_eq!(
+        plain,
+        "\
+╭─ ○ a ────────────────────────────────────────────── Pro ─╮
+│ 5 hour       █████░░░░░░░░░░░░░░░  27%                   │
+│ 7 day        █████████░░░░░░░░░░░  46%                   │
+╰──────────────────────────────────────────────────────────╯
+
+╭─ ● b  current ───────────────────────────────── Max 20x ─╮
+│ 5 hour       █████░░░░░░░░░░░░░░░  27%                   │
+│ 7 day        █████████░░░░░░░░░░░  46%                   │
+│ Extra usage  $12.40 / $50.00                             │
+╰──────────────────────────────────────────────────────────╯
+"
+    );
+    let plain_json: Value = serde_json::from_str(&ccam(&["usage", "--json"])).unwrap();
+    assert_eq!((plain_json[1]["plan"].as_str(), plain_json[1]["plan_label"].as_str()), (Some("max"), Some("Max 20x")));
+    assert_eq!(plain_json[1]["extra_usage"]["used_credits"], 1240.0);
+    assert!(plain_json[0].get("info").is_none() && plain_json[0].get("email").is_none());
+
+    let start = api.count();
+    let boxes = ccam(&["usage", "--info"]);
+    let profile_and_usage =
+        ["GET /api/oauth/profile", "GET /api/oauth/profile", "GET /api/oauth/usage", "GET /api/oauth/usage"];
+    let eligibility = format!(
+        "GET /api/oauth/organizations/{ORG_B}/referral/eligibility?campaign=claude_code_guest_pass org={ORG_B}"
+    );
+    let mut expected: Vec<String> = profile_and_usage.iter().map(|s| s.to_string()).chain([eligibility]).collect();
+    expected.sort();
+    assert_eq!(api.requests_since(start), expected, "one profile per account; passes only where the cache is missing");
+    for line in [
+        "a  test-A@example.test",
+        "b  test-B@example.test  current",
+        "│ name: Test (Test Person) ",
+        "│ organization: Test Org (claude_pro) ",
+        "│ billing: card (Stripe) ",
+        "│ subscription status: active ",
+        "│ subscription created: 2024-03-01 ",
+        "│ no Claude Code trial ",
+        "│ extra usage disabled: out_of_credits ",
+        "│ Credit: $3.20 / $10.00 ",
+        "│ guest passes: 1 of 3 left, $10.00 reward (cached 3h ago) ",
+        "│ guest passes: 2 of 3 left, $10.00 reward ",
+    ] {
+        assert!(boxes.contains(line), "missing {line:?} in\n{boxes}");
+    }
+
+    let start = api.count();
+    let text = ccam(&["usage", "--json", "--info"]);
+    assert_eq!(api.requests_since(start), expected);
+    let out: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(out[0]["email"], "test-A@example.test");
+    assert_eq!(out[0]["info"]["display_name"], "Test");
+    assert_eq!(out[0]["info"]["billing_type"], "stripe_subscription");
+    assert_eq!(out[0]["info"]["extra_usage_disabled_reason"], "out_of_credits");
+    assert_eq!(out[1]["info"]["guest_passes"]["remaining_passes"], 2);
+    assert_eq!(
+        out[1]["info"]["raw"],
+        json!({"iguana_necktie": fake_usage("B")["iguana_necktie"], "seven_day_breakdown": {"rows": [{"percent": 4}]}}),
+        "raw keeps numbers and timestamps, never other strings"
+    );
+
+    for shown in [&boxes, &text] {
+        assert!(!shown.contains("SECRET") && !shown.contains("http"), "{shown}");
+    }
+    let log = switch_log(&home);
+    for private in ["Test", "example.test", "SECRET"] {
+        assert!(!log.contains(private), "{private} reached the log: {log}");
+    }
 }
 
 #[test]
@@ -727,10 +916,10 @@ fn login_adds_an_account_without_touching_the_main_login() {
     fs::create_dir_all(root.join("old")).unwrap();
     fs::write(root.join("old").join(".credentials.json"), "{}").unwrap();
     fs::create_dir_all(root.join("old.lock")).unwrap();
-    let api = profile_server();
+    let api = fake_api();
     let login = |name: &str, uuid: &str| {
         let mut cmd = claude.ccam(&home, &["login", name]);
-        cmd.env("FAKE_LOGIN_UUID", uuid).env("CCAM_API_BASE", &api);
+        cmd.env("FAKE_LOGIN_UUID", uuid).env("CCAM_API_BASE", &api.base);
         cmd
     };
 
@@ -794,7 +983,7 @@ fn a_second_login_is_refused_while_one_is_signing_in_and_leaves_its_dir_alone() 
     fs::write(running.join(".credentials.json"), "{}").unwrap();
 
     let mut second = claude.ccam(&home, &["login", "x"]);
-    second.env("FAKE_LOGIN_UUID", "X").env("CCAM_API_BASE", profile_server());
+    second.env("FAKE_LOGIN_UUID", "X").env("CCAM_API_BASE", fake_api().base);
     second.assert().code(1).stderr(contains("another ccam login is signing in"));
 
     assert!(running.join(".credentials.json").exists(), "the running sign-in's dir is not swept");
@@ -805,7 +994,7 @@ fn a_second_login_is_refused_while_one_is_signing_in_and_leaves_its_dir_alone() 
     // A crashed login's lock stops being touched, and is taken over once stale.
     filetime::set_file_mtime(ccam_dir.join("login.lock"), filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let mut after_crash = claude.ccam(&home, &["login", "x"]);
-    after_crash.env("FAKE_LOGIN_UUID", "X").env("CCAM_API_BASE", profile_server());
+    after_crash.env("FAKE_LOGIN_UUID", "X").env("CCAM_API_BASE", fake_api().base);
     after_crash.assert().success().stdout(contains("Saved 'x'"));
     assert!(!running.exists(), "the crashed run's dir is swept");
     assert!(!ccam_dir.join("login.lock").exists(), "the lock is released");

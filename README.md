@@ -102,7 +102,7 @@ Inside a Claude Code session, prefix commands with `!` (for example `! ccam to p
 | `ccam release <lane> [--force] [--delete]` | Give a lane's account back so any terminal can use it (`--delete` removes the lane folder) |
 | `ccam prune` | Remove empty lane directories that hold no account and have no running sessions |
 | `ccam sessions` | Running sessions per lane and the account each lane holds |
-| `ccam usage [--refresh] [--json] [--email]` | 5-hour, weekly and per-model usage for every account. `--email` also shows each account's email address |
+| `ccam usage [--refresh] [--json] [--email] [--info]` | 5-hour, weekly and per-model usage for every account, with the plan (Pro, Max 5x, Max 20x, Team, Enterprise) in the box border and an `Extra usage` line when extra usage is on. `--email` also shows each account's email address. `--info` adds account, billing and guest pass details (see [Account details](#account-details)) |
 | `ccam start [--refresh]` | Start the 5-hour window on every account with one tiny message each |
 | `ccam sync` | Save the newest login of the logged-in account (the hooks normally do this) |
 | `ccam setup [--auto]` / `ccam uninstall` | Add or remove the hooks |
@@ -113,6 +113,14 @@ Inside a Claude Code session, prefix commands with `!` (for example `! ccam to p
 Names start with a letter or digit and may contain letters, digits, `.`, `_`, `@` and `-` (up to 64 characters). `CLAUDE_CONFIG_DIR` is respected.
 
 Exit codes: `0` success, `1` the request cannot be done as asked, `2` a file, lock or credential store failed, `3` Anthropic's endpoints failed or a login could not be confirmed.
+
+### Account details
+
+`ccam usage --info` prints more under each box: name, organization, rate limit tier, how it is billed (`card (Stripe)`, `Apple`, `Google Play`, `AWS Marketplace`), subscription status, subscription and account creation dates, Claude Code trial, seat tier, extra usage, and for Pro and Max the guest passes left. It implies `--email`. It shows names and emails on the terminal, so run it when you want them. Nothing from `--info` is logged. `--json --info` adds an `info` object per account and a `raw` key with the usage fields ccam does not interpret, reduced to numbers, true/false, nulls and dates (any other text is dropped, so no link, code or id can get through). Status-like values print as returned only when they look like a plain word such as `active`, otherwise as `unrecognised`.
+
+It makes one profile request per account, plus one guest pass request when Claude Code's cached answer in `~/.claude.json` is missing or older than 24 hours. Without `--info`, ccam makes neither.
+
+It never shows tokens, ids, referral codes or links, invoice links, or other people's data. It cannot show the billing period, the next charge date, monthly vs annual billing or a cancel date: Anthropic gives those only to claude.ai. Look in claude.ai under Settings > Billing.
 
 ## Windows and WSL together
 

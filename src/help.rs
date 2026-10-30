@@ -79,7 +79,10 @@ Examples:
   ccam usage               Boxes with 5-hour and 7-day use and reset times
   ccam usage --refresh     Also renew expired logins of accounts not in use
   ccam usage --json        Machine-readable output for scripts
-  ccam usage --email       Also show each account's email address (only shown here, never logged)";
+  ccam usage --email       Also show each account's email address (only shown here, never logged)
+  ccam usage --info        Also show name, plan, billing, subscription status, trial, extra usage and guest
+                           passes for each account, with its email (one or two extra requests per account;
+                           shown only here, never logged)";
 
 pub const SYNC: &str = "\
 Claude Code renews its login every few hours and the old refresh token stops working. The hooks from

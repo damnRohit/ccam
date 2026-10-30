@@ -154,6 +154,24 @@ The usage endpoint limits how often you can ask. Wait a minute.
 ### `timed out` / `network error: ...` / `unexpected response (...)`
 Network trouble, or Anthropic changed the endpoint. Retry. If it persists across days, the endpoint may have changed; check for a ccam update.
 
+### `info unavailable: <reason>` (with `ccam usage --info`)
+The profile request for that account failed. `<reason>` is `no usable access token` (a stale or expired login: run `ccam usage --refresh`, or send a message in Claude for the live one) or one of the network messages above. The rest of the card is unaffected. Retry.
+
+### `guest passes unavailable: <reason>`
+The guest pass request failed. It is separate from the profile request, so one can work without the other. Retry. Claude Code's cached answer is used first when it is under 24 hours old, so this only appears when there is no recent cache.
+
+### `guest passes unavailable: the saved organization id is not a uuid`
+The account's saved `oauthAccount` has an organization id ccam will not put into a request. Nothing was sent. Run `ccam login <name>` for that account to save a fresh copy.
+
+### A line in `--info` says `unrecognised`
+Anthropic sent a value that does not look like a plain status word, so ccam does not print it, in case it carries a link or an id. Check that detail on claude.ai.
+
+### `guest passes: not eligible`
+Anthropic says that account has no guest passes. Only Pro and Max accounts are eligible, and the offer can be withdrawn. Team and Enterprise cards show no guest pass line.
+
+### `ccam usage --info` shows no renewal date
+It cannot. The billing period, next charge, monthly or annual billing and cancel date are not in anything Claude Code's login can read. They exist only on claude.ai, under Settings > Billing.
+
 ### `ccam start` says `skipped: saved login expired; run with --refresh to renew it`
 Run `ccam start --refresh`.
 

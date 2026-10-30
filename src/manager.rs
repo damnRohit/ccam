@@ -848,6 +848,14 @@ mod tests {
         fn usage(&self, _: &str) -> std::result::Result<Value, ApiError> {
             unreachable!()
         }
+
+        fn profile(&self, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!()
+        }
+
+        fn referral_eligibility(&self, _: &str, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!()
+        }
     }
 
     struct BrokenStore;

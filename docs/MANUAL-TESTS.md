@@ -115,6 +115,18 @@ T3 Code installed and signed in to Claude, a project open in it. Three saved acc
 
 Pass: each lane has exactly one instance whose label matches its account, no thread needs `/login`, a T3 problem never fails a lane command, and nothing outside `ccam-lane-*` in `settings.json` ever changes.
 
+## 11. `ccam usage --info`
+
+One Pro account and one Max account saved, claude.ai open in a browser signed in to each in turn (a private window for the second). Info shows names and emails, so do not paste the output anywhere.
+
+1. `ccam usage`. Each border shows the plan: `Pro`, and `Max 5x` or `Max 20x` matching the Max account on claude.ai Settings > Usage. With extra usage on, an `Extra usage  <used> / <limit>` line shows, matching Settings > Usage.
+2. `ccam usage --info`. Per account, compare with claude.ai Settings > Billing and Account: `billing:` says `card (Stripe)` (or `Apple`, `Google Play` for app billing), `subscription status: active`, `subscription created:` is the date the subscription started, `extra usage:` on or off matches the toggle.
+3. `guest passes: N of M left` matches `/passes` in Claude Code for the live account. Run `ccam usage --info` twice: the second shows `(cached ... ago)` when Claude Code's cache is under 24 hours old.
+4. No renewal date, next charge or cancel date appears on any card. Compare with claude.ai: those exist only there.
+5. `ccam usage --info --json` has an `info` object and `raw` per account and no token, id, referral code or link. `switch.log` has no new line from the run.
+
+Pass: every value that claude.ai also shows agrees, and nothing sensitive beyond names and emails is printed.
+
 ## Results
 
 | Date | Claude Code | OS | Tests | Result | Notes |
