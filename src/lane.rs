@@ -113,8 +113,6 @@ pub fn paths(main: &Paths, id: &LaneId) -> Result<Paths> {
 
 /// Creates the lane's config home, or brings it up to date with the main one. Safe to rerun while sessions in the
 /// lane are open: links that exist are kept, and files are replaced atomically.
-///
-/// A lane directory is never deleted: removing it would follow its links into the main history and vault.
 pub fn prepare(main: &Paths, lane: &Paths, exe: &Path) -> Result<()> {
     let home = &lane.config_home;
     let vault_parent = home.join("ccam");
