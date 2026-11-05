@@ -60,7 +60,76 @@ Setup as in `docs/WINDOWS-WSL.md`, with three saved accounts a, b, c.
 
 Pass: at no point does either side need `/login`, and `switch.log` shows one switch per side per step.
 
+## 8. Lanes (`ccam run`, `move`, `release`)
+
+Three saved accounts a, b, c, main login on c, `ccam setup` done. Keep the `[lane ...]` lines of `switch.log` with the result.
+
+1. Terminal 1: `claude`. Terminal 2: `ccam run a` (prints `Lane 1`). Terminal 3: `ccam run b` (lane 2). `/status` shows c, a and b.
+2. In terminal 1, `! ccam to` another free account, or leave it. Terminals 2 and 3 keep their account, and their next reply still reads from the cache (`/cost` or the usage line).
+3. In terminal 2, `/resume` lists conversations started in terminal 1, and `/rewind` offers code checkpoints for one of them.
+4. In terminal 2, ask Claude to remember something. It saves without asking for approval, and the note is in `~/.claude/projects/<project>/memory/`. A plain `claude` in that project recalls it.
+5. Terminal 4: `ccam run a` joins lane 1. `ccam sessions` lists both lane 1 sessions, lane 2's and the main one.
+6. Wait for (or force, by editing `expiresAt` to the past) a renewal in lane 1. `switch.log` has `[lane 1] sync 'a'`.
+7. `ccam move 1 b` is refused (b is in lane 2). `ccam move 1 <free account>` asks, then terminals 2 and 4 show the new account in `/status` after their next message; terminal 3 does not change.
+8. `ccam release 1` is refused while terminals 2 and 4 are open. Close them, `ccam release 1`, then `ccam to <that account>` in terminal 1 works without `/login`.
+9. `~/.claude/projects` still holds every transcript, and Remote Control in terminal 1 (if used) is still connected (anthropics/claude-code#88855).
+
+Pass: no `/login` at any step, no memory approval prompts, and a lane changes account only on `move`.
+
+## 9. `ccam login`
+
+Accounts a and b saved, main login on a, one Claude Code session open on it. A third claude.ai account d that is not saved. Keep the `login` lines of `switch.log` with the result.
+
+1. `ccam login d`. The browser opens; sign in as d. ccam prints `Saved 'd'. Switch to it with: ccam to d`.
+2. The open session's `/status` still shows a. `ccam list` shows d saved and a still marked `*`. `switch.log` has a line ending in `login 'd' (new)`. `~/.claude/ccam/login/` is empty and no `login/*.lock` remains. On macOS, `security dump-keychain` lists no `Claude Code-credentials-<hash>` item beyond the ones that existed before.
+3. `ccam to d`, then send a message. It works without `/login`, which shows the saved login was not revoked. `ccam to a` back.
+4. Private window case. In a browser still signed in to a, run `ccam login e` and approve as a. ccam prints `you signed in to 'a', which is already saved, not to a new account; nothing was saved` and suggests a private window. `ccam list` is unchanged and `login/` is empty. Run it again in a private window and sign in as a fourth account: it is saved as `e`.
+5. A name holding a different account. `ccam login a`, signing in as d: refused with `'a' holds a different account`. Nothing changes.
+6. Refresh. With d in use nowhere, `ccam login d` and sign in as d. ccam prints `Refreshed the saved login of 'd'.`, `switch.log` has `login 'd' (refreshed)`, and `login.json` has a newer `expiresAt` (compare values only). Then `ccam to d` and run `ccam login d` again: refused before the browser opens with `'d' is in use on the main login, so its login works and needs no new sign-in; nothing was changed`, and `login.json` is unchanged. Repeat with d in a lane (`ccam lane d`) and, if you have WSL, on the other install: each is refused the same way with `lane N`, `Windows` or `WSL (<distro>)`.
+6a. Unsaved account that is live. Log Claude Code in as an unsaved account g and run `ccam login h`, signing in as g: ccam prints `the account you signed in to is the one the main login uses, and it is not saved; nothing was saved. Save it from there instead: ccam save h` and exits 1. Nothing is saved. Then put g in a lane or on the other install without saving it, run `ccam login h` as g again: `the account you signed in to is in use on lane N` (or `Windows`, `WSL (<distro>)`), exit 1, nothing saved.
+6b. Offline. Turn the network off after the browser sign-in finishes, or run with `CCAM_API_BASE` pointing at a closed port. ccam prints `could not confirm which account you signed in to (...); nothing was saved. Retry when online`, exits 3, `ccam list` is unchanged and `login/` is empty.
+6c. Unreadable entry. Break `accounts/d/login.json` (invalid JSON) after copying it elsewhere, then run `ccam login d`: refused before the browser opens with `'d' exists in the vault but cannot be read (...); nothing was saved. Fix or delete .../d first`, exit 1. `ccam remove d` says `no saved account named 'd'`. Restore the file.
+7. Cancel. Start `ccam login f` and close the browser tab, or press Ctrl+C in the terminal. ccam prints `the sign-in did not finish (claude exited with N); nothing was saved` (or is stopped), and `ccam list` is unchanged.
+8. Crash leftovers. Kill ccam while the browser is open, so its cleanup does not run. Check that `~/.claude/ccam/login/` holds a folder. The next `ccam login <name>` deletes it before it starts.
+9. Each release, on Windows: `cmdkey /list` shows no `Claude Code-credentials` target. If it does, Claude Code has moved to Credential Manager. `ccam login` then prints `Claude Code reported a login but ccam cannot read it` and saves nothing, and ccam as a whole cannot read the main login either.
+
+Pass: in every step the main login, lanes and open sessions keep working with no `/login`, no `claude auth logout` is run (watch the process list during step 1), and the `login/` folder is empty after each command. If Remote Control is on in the open session, note whether it drops when d signs in (anthropics/claude-code#88855).
+
+## 10. Lanes in T3 Code
+
+T3 Code installed and signed in to Claude, a project open in it. Three saved accounts a, b, c, main login on c, `ccam setup` done. Copy `~/.t3/userdata/settings.json` before you start.
+
+1. **Memory in full-access mode.** Run `ccam lane a`. In T3, start a thread on the instance `Claude · lane 1 · a` in full-access mode and ask Claude to remember a fact, then to list its memory. Pass: the note saves and the listing runs with no approval prompt, and the note is in `~/.claude/projects/<project>/memory/`. A plain `claude` in the project recalls it. If a prompt appears, anthropics/claude-code#98044 also hits `bypassPermissions` in T3: record it, and see Gap 1 of `docs/research/t3code.md` for the planned fix. The rest of this section does not depend on the result.
+2. **Creating the instance.** `ccam lane a` did not open Claude and printed `Lane 1 holds 'a'.` and `T3 Code: lane 1 is in the model picker as 'Claude · lane 1 · a'.`. `settings.json` now has `providerInstances.ccam-lane-1` with `driver` `claudeAgent`, `displayName` `Claude · lane 1 · a`, `enabled` `true` and `config.homePath` set to the lane folder. The instance appears in T3's model picker within a few seconds, with no restart. A diff against your copy shows changes only under `ccam-lane-*`.
+3. **Reuse and naming.** Run `ccam lane a` again: it prints the same two lines for lane 1, and `settings.json` is not rewritten (its modified time does not change). `ccam lane b --lane api` prints `Lane api holds 'b'.` and creates `ccam-lane-api`. `ccam lane c` is refused with `'c' is the main login; open it with plain `claude`, ...`, and so is `ccam lane b --lane 1` (`'b' is in lane api` ...). `ccam lane a --lane api` is refused too.
+4. **Parallel accounts.** Start a thread on each of the two lane instances and send a message in both at the same time. `ccam sessions` shows each session under its lane, and `ccam list` marks a and b as in use. A thread on the default instance still runs on c.
+5. **Child agents.** In a thread on the lane 1 instance, ask Claude to start a child agent with `delegate_task`, without naming a target. The child runs on the lane 1 instance, and `ccam sessions` lists it under lane 1. A Codex thread, if you have one, is unaffected.
+6. **Move.** `ccam move 1 <free account>` (answer yes). It prints `Moved lane 1 from 'a' to '<account>'.`. The label becomes `Claude · lane 1 · <account>`. The open thread keeps its conversation, and its next reply goes out on the new account. The prompt cache is rebuilt once and not on later messages.
+7. **Changing instance in T3.** Switch that thread to the default instance in the picker. Record what happens: expected is a fresh session that sees about 16k tokens of history, not the whole conversation. Switch it back.
+8. **Config refresh.** Add a line to `~/.claude/CLAUDE.md`. Start a new thread on the lane 1 instance and ask Claude what the line says. Pass: it knows. The lane's own `CLAUDE.md` (`~/.claude/ccam/lanes/1/CLAUDE.md`) now has the line, and `switch.log` has `[lane 1] settings refreshed` for that session start. Start another thread without editing anything: the lane's files keep their modified times. Then break the main `settings.json` (make it a JSON array) and start a thread: `switch.log` has `[lane 1] settings not refreshed: ...`, the thread still runs, and the lane's files are unchanged. Restore the file.
+9. **Renewals.** After a renewal in a lane thread, `switch.log` has `[lane 1] sync '<account>'`.
+10. **Release and delete.** Close the lane's threads, then `ccam release 1`. It prints `Released '<account>' from lane 1. Any terminal can use it again.`. The instance is disabled (`enabled` is `false`, the label is `Claude · lane 1`) and gone from the picker. `ccam lane <account> --lane 1` brings it back. Then `ccam release 1 --delete` prints `Removed lane 1.` (and, for a second released lane, `ccam prune` prints `Removed empty lane <id>.`) and removes the `ccam-lane-*` entries. Other instances in `settings.json` are unchanged throughout.
+11. **Instance ids.** `ccam lane a --lane work.2` creates an entry `ccam-lane-work_2_` followed by 8 hex characters, with the label `Claude · lane work.2 · a`, and T3 shows it. `ccam lane a --lane work-2` (after releasing `work.2`) creates `ccam-lane-work-2`, a different id. Release and delete both when done.
+12. **No T3.** With `T3CODE_HOME` pointing at an empty folder, `ccam lane a` prints `Lane <id> holds 'a'.` and `T3 Code not found; skipped adding the lane to T3.`, still creates the lane, and exits 0.
+13. **T3 file unusable.** Replace `settings.json` with `[1]`, then run `ccam lane a`. It prints `Lane <id> holds 'a'.` and, on stderr, `ccam: could not update T3 Code: <path>: top level is not a JSON object`, exits 0, and leaves the file byte for byte as it was. `switch.log` has `t3: <path>: top level is not a JSON object`. Restore your copy and run `ccam lane a` again: the instance is back. Repeat with `{not json` (the message ends in `invalid JSON: ...`).
+
+Pass: each lane has exactly one instance whose label matches its account, no thread needs `/login`, a T3 problem never fails a lane command, and nothing outside `ccam-lane-*` in `settings.json` ever changes.
+
+## 11. `ccam usage --info`
+
+One Pro account and one Max account saved, claude.ai open in a browser signed in to each in turn (a private window for the second). Info shows names and emails, so do not paste the output anywhere.
+
+1. `ccam usage`. Each border shows the plan: `Pro`, and `Max 5x` or `Max 20x` matching the Max account on claude.ai Settings > Usage. With extra usage on, an `Extra usage  <used> / <limit>` line shows, matching Settings > Usage.
+2. `ccam usage --info`. Per account, compare with claude.ai Settings > Billing and Account: `billing:` says `card (Stripe)` (or `Apple`, `Google Play` for app billing), `subscription status: active`, `subscription created:` is the date the subscription started, `extra usage:` on or off matches the toggle.
+3. `guest passes: N of M left` matches `/passes` in Claude Code for the live account. Run `ccam usage --info` twice: the second shows `(cached ... ago)` when Claude Code's cache is under 24 hours old.
+4. No renewal date, next charge or cancel date appears on any card. Compare with claude.ai: those exist only there.
+5. `ccam usage --info --json` has an `info` object and `raw` per account and no token, id, referral code or link. `switch.log` has no new line from the run.
+
+Pass: every value that claude.ai also shows agrees, and nothing sensitive beyond names and emails is printed.
+
 ## Results
+
+Before publishing lane changes, install `skills/ccam` using the README instructions in a disposable agent configuration. Confirm the skill is discovered and recommends `ccam run` for a standalone terminal, and selecting a provider tab **and a model** for T3. In T3, send a user-approved test message and confirm its run uses the selected instance; selecting only a tab must not be reported as a completed switch. A handoff is not proof that all historical context or cache transferred. Do not use real account credentials in automated tests.
 
 | Date | Claude Code | OS | Tests | Result | Notes |
 |---|---|---|---|---|---|

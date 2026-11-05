@@ -221,7 +221,12 @@ impl Drop for LockGuard {
             let _ = handle.join();
         }
         if self.id.is_some() && dir_id(&self.path) == self.id {
-            let _ = fs::remove_dir(&self.path);
+            for _ in 0..10 {
+                if fs::remove_dir(&self.path).is_ok() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }

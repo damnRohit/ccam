@@ -1,6 +1,6 @@
 //! Starting an interactive Claude Code in the current terminal.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Overrides which binary is run, for tests. Production use never sets it.
@@ -14,18 +14,26 @@ pub fn claude_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
-/// Runs `claude <args>` attached to this terminal and returns its exit code.
+/// `claude` with this process's environment minus Claude Code's session markers. `config_dir` replaces
+/// `CLAUDE_CONFIG_DIR`, for a lane.
 ///
 /// Claude Code marks its child processes with CLAUDE* variables; a Claude Code started with them believes it is
 /// a nested child session and does not save its transcript. `CLAUDE_CONFIG_DIR` is configuration, not a marker.
-pub fn claude(args: &[String]) -> std::io::Result<i32> {
+pub fn command(config_dir: Option<&Path>) -> Command {
     let mut command = Command::new(claude_binary());
-    command.args(args);
     for (key, _) in std::env::vars_os() {
         let upper = key.to_string_lossy().to_ascii_uppercase();
         if upper.starts_with("CLAUDE") && upper != "CLAUDE_CONFIG_DIR" {
             command.env_remove(key);
         }
     }
-    Ok(command.status()?.code().unwrap_or(1))
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    command
+}
+
+/// Runs `claude <args>` attached to this terminal and returns its exit code.
+pub fn claude(args: &[String], config_dir: Option<&Path>) -> std::io::Result<i32> {
+    Ok(command(config_dir).args(args).status()?.code().unwrap_or(1))
 }

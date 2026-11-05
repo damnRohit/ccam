@@ -5,6 +5,9 @@
 //! without the right lock does not compile. Network calls never happen while Claude Code's locks are held,
 //! because Claude Code gives up on a held lock after a few retries and would then fail its own token refresh.
 
+use std::fmt;
+use std::path::Path;
+
 use serde_json::Value;
 
 use crate::api::{ApiError, OAuthClient};
@@ -79,6 +82,13 @@ impl Overview {
 pub struct Switched {
     pub from: Option<AccountName>,
     pub to: AccountName,
+}
+
+#[derive(Debug)]
+pub struct Adopted {
+    pub name: AccountName,
+    /// The account was already saved under this name and its login was replaced.
+    pub refreshed: bool,
 }
 
 pub struct Saved {
@@ -157,7 +167,7 @@ impl SwitchLocks {
         Ok(Self { config: lock::acquire(&paths.global_config_lock, timing)?, credentials })
     }
 
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         self.credentials.check()?;
         self.config.ensure_held()
     }
@@ -171,6 +181,21 @@ pub struct Manager {
     vault: Vault,
     timings: LockTimings,
     side: Side,
+}
+
+/// Where an account is live, for `ccam login`'s refusals.
+enum Holder {
+    MainLogin,
+    Elsewhere(Side),
+}
+
+impl fmt::Display for Holder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MainLogin => f.write_str("the main login"),
+            Self::Elsewhere(side) => f.write_str(&side.label()),
+        }
+    }
 }
 
 enum Ownership {
@@ -197,10 +222,11 @@ enum Assessment {
 
 impl Manager {
     pub fn new(paths: Paths, store: Box<dyn LoginStore>, client: Box<dyn OAuthClient>) -> Self {
+        let side = Side::current(&paths);
         Self {
             config: GlobalConfig::new(paths.global_config.clone()),
-            vault: Vault::new(paths.vault_dir.clone()),
-            side: Side::current(&paths),
+            vault: Vault::new(paths.vault_dir.clone()).tagged(side.lane.as_ref().map(|lane| format!("lane {lane}"))),
+            side,
             store,
             client,
             paths,
@@ -255,7 +281,7 @@ impl Manager {
         let listing = self.vault.list()?;
         let Some(target) = listing.get(name) else { return Ok(()) };
         match self.used_elsewhere(&target.identity) {
-            Some(mark) => Err(Error::InUseElsewhere { name: target.name.clone(), side: mark.side.label() }),
+            Some(mark) => Err(taken(target.name.clone(), &mark)),
             None => Ok(()),
         }
     }
@@ -268,6 +294,21 @@ impl Manager {
     /// A consistent-enough read of saved accounts and the live login, without locks, for display.
     pub fn overview(&self) -> Result<Overview> {
         Ok(Overview { listing: self.vault.list()?, live: self.read_live()? })
+    }
+
+    pub fn remove_lane(&self, lane: &Self, id: &crate::lane::LaneId) -> Result<bool> {
+        if lane.paths.config_home != crate::lane::paths(&self.paths, id)?.config_home {
+            return Err(Error::Lane("the lane paths do not match the main config directory".into()));
+        }
+        let vault = self.lock_vault()?;
+        let credentials = CredentialLocks::acquire(vault, &lane.paths, lane.timings.credentials)?;
+        let locks = SwitchLocks::acquire(credentials, &lane.paths, lane.timings.config)?;
+        if !matches!(lane.read_live()?, LiveState::LoggedOut) {
+            return Ok(false);
+        }
+        lane.record_presence(locks.credentials.vault());
+        crate::lane::remove(&self.paths, id, &locks)?;
+        Ok(true)
     }
 
     pub fn sync(&self, network: Network) -> Result<SyncOutcome> {
@@ -364,6 +405,97 @@ impl Manager {
         Ok(Saved { name, warning })
     }
 
+    /// Saves the login `fresh` holds under `name`. `fresh` is a throwaway config dir that `ccam login` signed in,
+    /// so its login is a new family of tokens that no install uses yet. Only the vault changes.
+    ///
+    /// An account is saved or refreshed only while it is live nowhere: two families of one account, one live and
+    /// one in the vault, would make the live install's login look older than the saved one.
+    pub fn adopt(&self, name: &AccountName, fresh: &Manager) -> Result<Adopted> {
+        let live = match fresh.read_live()? {
+            LiveState::Present(live) => *live,
+            LiveState::Unreadable => return Err(Error::LiveUnreadable),
+            LiveState::LoggedOut => {
+                return Err(Error::Login(
+                    "Claude Code reported a login but ccam cannot read it. It may have stored it in Windows Credential Manager, which ccam does not support yet. Nothing was saved".into(),
+                ));
+            }
+        };
+        // The sign-in was just made online, so an unanswered check is a failure, not a reason to save unconfirmed.
+        match self.ownership(&live) {
+            Ownership::Confirmed => {}
+            Ownership::Refuted(reason) => return Err(Error::LiveUnverified { name: name.clone(), reason }),
+            Ownership::Unknown(reason) => return Err(Error::LoginUnconfirmed(reason)),
+        }
+
+        // Claude Code's locks too, so the main login is not read halfway through a `/login`.
+        let locks = self.lock_credentials()?;
+        let listing = self.vault.list()?;
+        refuse_unreadable(&listing, self.vault.dir(), name)?;
+        if let Some(occupant) = listing.get(name)
+            && occupant.identity != live.identity
+        {
+            return Err(Error::NameHoldsOtherAccount(occupant.name.clone()));
+        }
+        let existing = listing.find(&live.identity);
+        if let Some(existing) = existing
+            && &existing.name != name
+        {
+            return Err(Error::Login(format!(
+                "you signed in to '{0}', which is already saved, not to a new account; nothing was saved. Your browser was probably still signed in to it: retry in a private window, or run: ccam login {0} to refresh '{0}'",
+                existing.name
+            )));
+        }
+        if let Some(holder) = self.holder(&live.identity)? {
+            return Err(Error::Login(match (existing, holder) {
+                (None, Holder::MainLogin) => format!(
+                    "the account you signed in to is the one the main login uses, and it is not saved; nothing was saved. Save it from there instead: ccam save {name}"
+                ),
+                (None, holder) => format!(
+                    "the account you signed in to is in use on {holder}, so its login works and was left alone; nothing was saved"
+                ),
+                (Some(existing), holder) => format!(
+                    "'{}' is in use on {holder}, so its login works and was left alone; nothing was saved",
+                    existing.name
+                ),
+            }));
+        }
+
+        let refreshed = existing.is_some();
+        let name = existing.map_or_else(|| name.clone(), |a| a.name.clone());
+        let account = Account {
+            name: name.clone(),
+            identity: live.identity,
+            oauth_account: live.oauth_account,
+            login: live.login,
+        };
+        self.vault.put(locks.vault(), &account)?;
+        self.vault.log(&format!("login '{name}' ({})", if refreshed { "refreshed" } else { "new" }));
+        Ok(Adopted { name, refreshed })
+    }
+
+    /// Refuses `ccam login` for a saved account that is live somewhere, before the user signs in for nothing:
+    /// `adopt` would refuse the new login anyway.
+    pub fn check_login_free(&self, name: &AccountName) -> Result<()> {
+        let listing = self.vault.list()?;
+        refuse_unreadable(&listing, self.vault.dir(), name)?;
+        let Some(account) = listing.get(name) else { return Ok(()) };
+        match self.holder(&account.identity)? {
+            Some(holder) => Err(Error::Login(format!(
+                "'{}' is in use on {holder}, so its login works and needs no new sign-in; nothing was changed",
+                account.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Where `identity` is live: this install's login, or another install's.
+    fn holder(&self, identity: &Identity) -> Result<Option<Holder>> {
+        if matches!(self.read_live()?, LiveState::Present(live) if live.identity == *identity) {
+            return Ok(Some(Holder::MainLogin));
+        }
+        Ok(self.used_elsewhere(identity).map(|m| Holder::Elsewhere(m.side)))
+    }
+
     pub fn rename(&self, from: &AccountName, to: &AccountName) -> Result<()> {
         let lock = self.lock_vault()?;
         let listing = self.vault.list()?;
@@ -425,7 +557,7 @@ impl Manager {
         // Checked again under the vault lock: the early check can race another install's switch, and both
         // installing the same saved login would let the first renewal log the other out.
         if let Some(mark) = self.used_elsewhere(&plan.target.identity) {
-            return Err(Error::InUseElsewhere { name: plan.target.name, side: mark.side.label() });
+            return Err(taken(plan.target.name, &mark));
         }
 
         if let Some(leaving) = &plan.save_leaving {
@@ -438,6 +570,37 @@ impl Manager {
         let from_label = plan.from.as_ref().map_or_else(|| "(logged out)".to_string(), ToString::to_string);
         self.vault.log(&format!("switch '{from_label}' -> '{}'", plan.target.name));
         Ok(Switched { from: plan.from, to: plan.target.name })
+    }
+
+    /// Checks the live account back into the vault and logs this install out, so other installs may use it. Meant
+    /// for lanes. The live login is dropped only once the vault holds exactly it, so the working copy is never lost.
+    pub fn release(&self) -> Result<AccountName> {
+        if let SyncOutcome::Unverified { name, reason } = self.sync(Network::Allowed)? {
+            return Err(Error::LiveUnverified { name, reason });
+        }
+        let locks = self.lock_switch(self.timings.credentials)?;
+        let changed =
+            |name| Error::LiveUnverified { name, reason: "the login changed while it was saved; retry".into() };
+        let name = match self.assess(&locks.credentials)? {
+            Assessment::Settled(SyncOutcome::Unchanged(name)) => name,
+            Assessment::Settled(SyncOutcome::NotLoggedIn) => {
+                self.record_presence(locks.credentials.vault());
+                return Err(Error::NotLoggedIn);
+            }
+            Assessment::Settled(SyncOutcome::LiveUnreadable) => return Err(Error::LiveUnreadable),
+            Assessment::Settled(SyncOutcome::NotSaved) => return Err(Error::LiveNotSaved),
+            Assessment::Settled(SyncOutcome::SavedIsNewer(name)) => return Err(Error::GenerationConflict(name)),
+            Assessment::Settled(SyncOutcome::Updated(name) | SyncOutcome::Unverified { name, .. }) => {
+                return Err(changed(name));
+            }
+            Assessment::Renewal { saved, .. } | Assessment::NewLogin { saved, .. } => return Err(changed(saved.name)),
+        };
+        locks.check()?;
+        self.store.clear()?;
+        self.config.remove_oauth_account()?;
+        self.record_presence(locks.credentials.vault());
+        self.vault.log(&format!("release '{name}'"));
+        Ok(name)
     }
 
     /// Makes `target` the live login and identity. The two writes cannot be atomic together, and a half-done
@@ -585,6 +748,28 @@ impl Manager {
     }
 }
 
+/// Refuses to write `name` while the vault has an entry of that name it cannot load: the entry may hold the only
+/// working copy of a login. `ccam remove` cannot remove it either, since it does not load.
+fn refuse_unreadable(listing: &Listing, vault: &Path, name: &AccountName) -> Result<()> {
+    match listing.problems.iter().find(|p| p.entry.eq_ignore_ascii_case(name.as_str())) {
+        Some(problem) => Err(Error::Login(format!(
+            "'{}' exists in the vault but cannot be read ({}); nothing was saved. Fix or delete {} first",
+            problem.entry,
+            problem.reason,
+            vault.join(&problem.entry).display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Why `name` cannot be used here: another install holds it.
+fn taken(name: AccountName, holder: &Mark) -> Error {
+    match &holder.side.lane {
+        Some(lane) => Error::InLane { name, lane: lane.clone() },
+        None => Error::InUseElsewhere { name, side: holder.side.label() },
+    }
+}
+
 struct SwitchPlan {
     target: Account,
     from: Option<AccountName>,
@@ -678,6 +863,14 @@ mod tests {
         fn usage(&self, _: &str) -> std::result::Result<Value, ApiError> {
             unreachable!()
         }
+
+        fn profile(&self, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!()
+        }
+
+        fn referral_eligibility(&self, _: &str, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!()
+        }
     }
 
     struct BrokenStore;
@@ -687,6 +880,9 @@ mod tests {
             Ok(None)
         }
         fn write(&self, _: &OAuthLogin) -> Result<()> {
+            Err(Error::Keychain("disk full".into()))
+        }
+        fn clear(&self) -> Result<()> {
             Err(Error::Keychain("disk full".into()))
         }
     }
@@ -770,6 +966,151 @@ mod tests {
 
     fn save(f: &Fixture, account: &str) {
         f.manager.save(&name(account)).unwrap();
+    }
+
+    /// A throwaway config dir in `f`'s home, logged in as `uuid` by `ccam login`.
+    fn fresh_login(f: &Fixture, uuid: &str, expires_at: i64) -> (Paths, Manager) {
+        let dir = f.paths.config_home.join("ccam").join("login").join("t1");
+        fs::create_dir_all(&dir).unwrap();
+        let paths = Paths::resolve(f._home.path(), Some(dir.to_string_lossy().into_owned()));
+        log_in(&paths, uuid, expires_at);
+        let store = Box::new(FileStore::new(paths.credentials_file.clone()));
+        let manager =
+            Manager::new(paths.clone(), store, Box::new(Arc::clone(&f.client))).with_lock_timings(FAST_TIMINGS);
+        (paths, manager)
+    }
+
+    #[test]
+    fn a_fresh_login_is_saved_under_the_name_given_first_and_the_main_login_is_untouched() {
+        let f = fixture();
+        log_in(&f.paths, "A", 100);
+        save(&f, "a");
+        let (_, fresh) = fresh_login(&f, "N", 500);
+
+        assert!(!f.manager.adopt(&name("new"), &fresh).unwrap().refreshed);
+
+        assert_eq!(saved_expiry(&f.paths, "new"), 500);
+        assert_eq!(live_credentials(&f.paths)["claudeAiOauth"]["accessToken"], "at-A-100", "main login unchanged");
+        assert_eq!(entries(&f), [("a".into(), true), ("new".into(), false)]);
+    }
+
+    #[test]
+    fn a_fresh_login_refreshes_its_own_saved_account_only_while_that_account_is_not_live() {
+        let f = fixture();
+        log_in(&f.paths, "B", 100);
+        save(&f, "b");
+        log_in(&f.paths, "A", 100);
+        save(&f, "a");
+
+        // 'b' is saved but live nowhere: an expired or dead copy is replaced, even by an older-looking login.
+        let (_, fresh) = fresh_login(&f, "B", 50);
+        assert!(f.manager.adopt(&name("B"), &fresh).unwrap().refreshed);
+        assert_eq!(saved_expiry(&f.paths, "b"), 50);
+
+        // 'a' is the main login: a second family of the same account in the vault would make it look stale.
+        let (_, fresh) = fresh_login(&f, "A", 900);
+        assert!(matches!(f.manager.adopt(&name("a"), &fresh), Err(Error::Login(m)) if m.contains("in use")));
+        assert_eq!(saved_expiry(&f.paths, "a"), 100);
+    }
+
+    #[test]
+    fn a_fresh_login_of_the_wrong_account_is_refused_and_nothing_is_saved() {
+        let f = fixture();
+        log_in(&f.paths, "A", 100);
+        save(&f, "a");
+        log_in(&f.paths, "B", 100);
+        save(&f, "b");
+
+        // The browser was still signed in to 'a'.
+        let (_, fresh) = fresh_login(&f, "A", 700);
+        let err = f.manager.adopt(&name("third"), &fresh).unwrap_err();
+        assert!(matches!(&err, Error::Login(m) if m.contains("'a'") && m.contains("private")), "{err}");
+        assert!(!f.paths.vault_dir.join("third").exists());
+
+        let (_, fresh) = fresh_login(&f, "C", 700);
+        assert!(matches!(f.manager.adopt(&name("b"), &fresh), Err(Error::NameHoldsOtherAccount(_))));
+
+        let (fresh_paths, fresh) = fresh_login(&f, "C", 700);
+        write_live(&fresh_paths, "C", "B", 700, Some(9_000));
+        assert!(matches!(f.manager.adopt(&name("c"), &fresh), Err(Error::LiveUnverified { .. })));
+        assert!(!f.paths.vault_dir.join("c").exists());
+    }
+
+    #[test]
+    fn a_fresh_login_that_left_no_readable_login_is_reported() {
+        let f = fixture();
+        let (fresh_paths, fresh) = fresh_login(&f, "N", 500);
+        fs::remove_file(&fresh_paths.credentials_file).unwrap();
+
+        assert!(
+            matches!(f.manager.adopt(&name("n"), &fresh), Err(Error::Login(m)) if m.contains("Credential Manager"))
+        );
+    }
+
+    #[test]
+    fn a_fresh_login_never_overwrites_a_saved_entry_that_cannot_be_read() {
+        let f = fixture();
+        let broken = f.paths.vault_dir.join("broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("login.json"), "{oops").unwrap();
+        fs::write(broken.join("account.json"), r#"{"accountUuid":"N"}"#).unwrap();
+        let before = (fs::read(broken.join("login.json")).unwrap(), fs::read(broken.join("account.json")).unwrap());
+        let (_, fresh) = fresh_login(&f, "N", 500);
+
+        let refused = |r: Result<()>| matches!(r, Err(Error::Login(m)) if m.contains("cannot be read"));
+        assert!(refused(f.manager.adopt(&name("Broken"), &fresh).map(drop)));
+        let after = (fs::read(broken.join("login.json")).unwrap(), fs::read(broken.join("account.json")).unwrap());
+        assert_eq!(before, after);
+
+        assert!(refused(f.manager.check_login_free(&name("Broken"))), "refused before the browser opens");
+    }
+
+    #[test]
+    fn a_fresh_login_whose_owner_cannot_be_confirmed_is_not_saved() {
+        let f = fixture();
+        let (fresh_paths, fresh) = fresh_login(&f, "N", 500);
+        write_live(&fresh_paths, "N", "OFFLINE", 500, Some(9_000));
+
+        assert!(matches!(f.manager.adopt(&name("n"), &fresh), Err(Error::LoginUnconfirmed(_))));
+        assert!(!f.paths.vault_dir.join("n").exists());
+    }
+
+    #[test]
+    fn a_fresh_login_of_an_account_live_somewhere_but_unsaved_is_refused() {
+        let f = fixture();
+        log_in(&f.paths, "M", 100);
+        let (_, fresh) = fresh_login(&f, "M", 500);
+        let err = f.manager.adopt(&name("m"), &fresh).unwrap_err();
+        assert!(matches!(&err, Error::Login(m) if m.contains("main login") && m.contains("ccam save m")), "{err}");
+
+        let in_lane = Side::new(Platform::Windows, "/ccam".into(), &f.paths.config_home.join("ccam/lanes/2/x.json"));
+        let wsl = Side::new(Platform::Wsl { distro: "Ubuntu".into() }, "/ccam".into(), Path::new("/elsewhere"));
+        for (side, uuid, place) in [(in_lane, "L", "lane 2"), (wsl, "W", "WSL (Ubuntu)")] {
+            let identity = Identity::from_oauth_account(&json!({"accountUuid": uuid, "organizationUuid": "org"}));
+            presence::record(&f.paths.vault_dir, &side, identity.as_ref()).unwrap();
+            let (_, fresh) = fresh_login(&f, uuid, 500);
+            let err = f.manager.adopt(&name("x"), &fresh).unwrap_err();
+            assert!(matches!(&err, Error::Login(m) if m.contains(&format!("in use on {place}"))), "{err}");
+        }
+        assert!(f.manager.overview().unwrap().listing.accounts.is_empty());
+    }
+
+    #[test]
+    fn a_fresh_login_is_saved_under_claude_codes_locks_and_checked_outside_them() {
+        let f = fixture();
+        log_in(&f.paths, "A", 100);
+        save(&f, "a");
+        let (_, fresh) = fresh_login(&f, "N", 500);
+
+        let held = lock::acquire(&f.paths.refresh_lock, FAST).unwrap();
+        assert!(matches!(f.manager.adopt(&name("n"), &fresh), Err(Error::LockTimeout { .. })));
+        assert!(!f.paths.vault_dir.join("n").exists());
+        drop(held);
+
+        // The check above ran while the test held the lock; only ccam's own locking counts from here.
+        let before = f.client().called_under_lock.load(Ordering::Relaxed);
+        f.manager.adopt(&name("n"), &fresh).unwrap();
+        assert_eq!(f.client().called_under_lock.load(Ordering::Relaxed), before);
     }
 
     #[test]
@@ -861,7 +1202,7 @@ mod tests {
         let f = fixture();
         log_in(&f.paths, "A", 100);
         save(&f, "a");
-        write_live(&f.paths, "A", "B", 200, Some(7_000));
+        write_live(&f.paths, "A", "B", 200, Some(700_000));
 
         assert!(matches!(f.manager.sync(Network::Allowed).unwrap(), SyncOutcome::Unverified { .. }));
         assert_eq!(saved_expiry(&f.paths, "a"), 100);
@@ -872,7 +1213,7 @@ mod tests {
         let f = fixture();
         log_in(&f.paths, "A", 100);
         save(&f, "a");
-        write_live(&f.paths, "A", "A", 200, Some(7_000));
+        write_live(&f.paths, "A", "A", 200, Some(700_000));
 
         assert_eq!(f.manager.sync(Network::Allowed).unwrap(), SyncOutcome::Updated(name("a")));
         assert_eq!(saved_expiry(&f.paths, "a"), 200);
@@ -885,7 +1226,7 @@ mod tests {
         log_in(&f.paths, "A", 100);
         save(&f, "a");
         let calls = f.client().calls.load(Ordering::Relaxed);
-        write_live(&f.paths, "A", "A", 200, Some(7_000));
+        write_live(&f.paths, "A", "A", 200, Some(700_000));
 
         assert!(matches!(f.manager.sync(Network::Offline).unwrap(), SyncOutcome::Unverified { .. }));
         assert_eq!(f.client().calls.load(Ordering::Relaxed), calls);
@@ -1060,7 +1401,7 @@ mod tests {
         save(&f, "a");
         log_in(&f.paths, "B", 100);
         save(&f, "b");
-        write_live(&f.paths, "B", "B", 200, Some(7_000));
+        write_live(&f.paths, "B", "B", 200, Some(700_000));
 
         assert!(matches!(f.manager.check_switch(&name("a")), Err(Error::LiveUnverified { .. })));
         assert!(matches!(f.manager.check_switch(&name("b")), Err(Error::AlreadyCurrent(_))));

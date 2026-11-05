@@ -13,6 +13,9 @@ use crate::login::{OAuthLogin, UnixMillis};
 /// Claude Code's public OAuth client id.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
+/// Sent with the per-organization routes, as Claude Code does.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const GUEST_PASS_CAMPAIGN: &str = "claude_code_guest_pass";
 const USER_AGENT: &str = concat!("ccam/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone)]
@@ -20,6 +23,8 @@ pub struct Endpoints {
     pub usage: String,
     pub profile: String,
     pub token: String,
+    /// Prefix of the per-organization routes, `<organizations>/<uuid>/...`.
+    pub organizations: String,
 }
 
 impl Endpoints {
@@ -33,6 +38,7 @@ impl Endpoints {
                     usage: format!("{base}/api/oauth/usage"),
                     profile: format!("{base}/api/oauth/profile"),
                     token: format!("{base}/v1/oauth/token"),
+                    organizations: format!("{base}/api/oauth/organizations"),
                 }
             }
             _ => Self::default(),
@@ -46,6 +52,7 @@ impl Default for Endpoints {
             usage: "https://api.anthropic.com/api/oauth/usage".into(),
             profile: "https://api.anthropic.com/api/oauth/profile".into(),
             token: "https://platform.claude.com/v1/oauth/token".into(),
+            organizations: "https://api.anthropic.com/api/oauth/organizations".into(),
         }
     }
 }
@@ -64,6 +71,8 @@ pub enum ApiError {
     Status(u16),
     #[error("unexpected response body")]
     Malformed,
+    #[error("the saved organization id is not a uuid")]
+    InvalidOrganization,
     #[error("network error: {0}")]
     Transport(String),
 }
@@ -77,6 +86,11 @@ pub trait OAuthClient: Send + Sync {
     fn refresh(&self, login: &OAuthLogin) -> Result<OAuthLogin, ApiError>;
     /// Raw usage JSON for the account owning an access token.
     fn usage(&self, access_token: &str) -> Result<Value, ApiError>;
+    /// Raw profile JSON (account, organization, plan and billing details) for the account owning an access token.
+    fn profile(&self, access_token: &str) -> Result<Value, ApiError>;
+    /// Raw guest pass eligibility JSON for an organization. The body holds the referral code and links, which are
+    /// a credential: callers read only the counts and the reward.
+    fn referral_eligibility(&self, access_token: &str, organization_uuid: &str) -> Result<Value, ApiError>;
 }
 
 pub struct Api {
@@ -100,20 +114,27 @@ impl Api {
         Self { agent, endpoints }
     }
 
-    fn get_with_token(&self, url: &str, access_token: &str, on_rejected: ApiError) -> Result<Value, ApiError> {
-        let response = self
+    fn get_with_token(
+        &self,
+        url: &str,
+        access_token: &str,
+        organization_uuid: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let mut request = self
             .agent
             .get(url)
             .header("Authorization", &format!("Bearer {access_token}"))
-            .header("anthropic-beta", OAUTH_BETA)
-            .call();
-        json_body(response, on_rejected)
+            .header("anthropic-beta", OAUTH_BETA);
+        if let Some(org) = organization_uuid {
+            request = request.header("anthropic-version", ANTHROPIC_VERSION).header("x-organization-uuid", org);
+        }
+        json_body(request.call(), ApiError::Unauthorized)
     }
 }
 
 impl OAuthClient for Api {
     fn account_uuid(&self, access_token: &str) -> Result<String, ApiError> {
-        let body = self.get_with_token(&self.endpoints.profile, access_token, ApiError::Unauthorized)?;
+        let body = self.profile(access_token)?;
         body["account"]["uuid"].as_str().filter(|uuid| !uuid.is_empty()).map(str::to_string).ok_or(ApiError::Malformed)
     }
 
@@ -132,8 +153,33 @@ impl OAuthClient for Api {
     }
 
     fn usage(&self, access_token: &str) -> Result<Value, ApiError> {
-        self.get_with_token(&self.endpoints.usage, access_token, ApiError::Unauthorized)
+        self.get_with_token(&self.endpoints.usage, access_token, None)
     }
+
+    fn profile(&self, access_token: &str) -> Result<Value, ApiError> {
+        self.get_with_token(&self.endpoints.profile, access_token, None)
+    }
+
+    fn referral_eligibility(&self, access_token: &str, organization_uuid: &str) -> Result<Value, ApiError> {
+        // The uuid comes from a local file and goes into the URL path and a header.
+        if !is_canonical_uuid(organization_uuid) {
+            return Err(ApiError::InvalidOrganization);
+        }
+        let url = format!(
+            "{}/{organization_uuid}/referral/eligibility?campaign={GUEST_PASS_CAMPAIGN}",
+            self.endpoints.organizations
+        );
+        self.get_with_token(&url, access_token, Some(organization_uuid))
+    }
+}
+
+/// `8-4-4-4-12` hex digits.
+fn is_canonical_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 fn json_body(
@@ -159,7 +205,12 @@ mod tests {
 
     fn api(server: &TestServer) -> Api {
         Api::new(
-            Endpoints { usage: server.url("/usage"), profile: server.url("/profile"), token: server.url("/token") },
+            Endpoints {
+                usage: server.url("/usage"),
+                profile: server.url("/profile"),
+                token: server.url("/token"),
+                organizations: server.url("/orgs"),
+            },
             Duration::from_millis(500),
         )
     }
@@ -191,7 +242,12 @@ mod tests {
             ("/limited", Reply::Json(429, "{}".into())),
             ("/hang", Reply::Hang),
         ]);
-        let mut endpoints = Endpoints { usage: server.url("/usage"), profile: String::new(), token: String::new() };
+        let mut endpoints = Endpoints {
+            usage: server.url("/usage"),
+            profile: String::new(),
+            token: String::new(),
+            organizations: String::new(),
+        };
         assert_eq!(Api::new(endpoints.clone(), Duration::from_millis(500)).usage("t"), Err(ApiError::Unauthorized));
         endpoints.usage = server.url("/limited");
         assert_eq!(Api::new(endpoints.clone(), Duration::from_millis(500)).usage("t"), Err(ApiError::RateLimited));
@@ -232,5 +288,52 @@ mod tests {
             Reply::Json(200, r#"{"account":{"uuid":"acc-1","email":"x"}}"#.into()),
         )]);
         assert_eq!(api(&server).account_uuid("tok").unwrap(), "acc-1");
+    }
+
+    #[test]
+    fn profile_returns_the_whole_body_with_the_bearer_token() {
+        let body = r#"{"account":{"uuid":"acc-1"},"organization":{"billing_type":"stripe_subscription"}}"#;
+        let server = TestServer::start(vec![("/profile", Reply::Json(200, body.into()))]);
+
+        let profile = api(&server).profile("tok").unwrap();
+
+        assert_eq!(profile["organization"]["billing_type"], "stripe_subscription");
+        let request = &server.received()[0];
+        assert_eq!((request.method.as_str(), request.headers["authorization"].as_str()), ("GET", "Bearer tok"));
+        assert_eq!(request.headers["anthropic-beta"], OAUTH_BETA);
+    }
+
+    #[test]
+    fn referral_eligibility_is_a_get_scoped_to_the_organization() {
+        let org = "0a1b2c3d-0000-4000-8000-00000000000f";
+        let route = format!("/orgs/{org}/referral/eligibility?campaign=claude_code_guest_pass");
+        let server = TestServer::start(vec![(route.as_str(), Reply::Json(200, r#"{"eligible":true}"#.into()))]);
+
+        assert_eq!(api(&server).referral_eligibility("tok", org).unwrap(), json!({"eligible": true}));
+
+        let request = &server.received()[0];
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("GET", route.as_str()));
+        assert_eq!(request.headers["authorization"], "Bearer tok");
+        assert_eq!(request.headers["anthropic-beta"], OAUTH_BETA);
+        assert_eq!(request.headers["anthropic-version"], "2023-06-01");
+        assert_eq!(request.headers["x-organization-uuid"], org);
+    }
+
+    #[test]
+    fn referral_eligibility_refuses_an_organization_that_is_not_a_uuid() {
+        let server = TestServer::start(vec![]);
+        assert_eq!(api(&server).referral_eligibility("tok", "../profile"), Err(ApiError::InvalidOrganization));
+        assert_eq!(api(&server).referral_eligibility("tok", ""), Err(ApiError::InvalidOrganization));
+        assert!(server.received().is_empty());
+    }
+
+    #[test]
+    fn referral_eligibility_requires_a_canonical_uuid_and_says_so() {
+        let server = TestServer::start(vec![]);
+        for org in ["a", "---", "0a1b2c3d-0000-4000-8000-0000000000-f", "0a1b2c3d0000-4000-8000-00000000000f-"] {
+            let error = api(&server).referral_eligibility("tok", org).unwrap_err();
+            assert_eq!(error.to_string(), "the saved organization id is not a uuid", "{org}");
+        }
+        assert!(server.received().is_empty(), "{:?}", server.received());
     }
 }

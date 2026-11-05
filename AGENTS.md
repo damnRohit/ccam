@@ -37,7 +37,7 @@ A change that needs to bend one of these needs the owner's agreement and a SPEC 
 
 ## Secrets
 
-Tokens and email addresses never appear in output, logs, test snapshots or commit messages. `OAuthLogin`'s `Debug` is redacted; keep it so. `switch.log` holds account names and events only.
+Tokens never appear in output, logs, test snapshots or commit messages. Email addresses and people's names don't either, with one exception the owner asked for: `ccam usage --email` and `ccam usage --info` print account emails and names (and `--info` billing details) to the terminal and in their `--json`. Nothing else prints them, and they are never logged. `OAuthLogin`'s `Debug` is redacted; keep it so. `switch.log` holds account names and events only.
 
 ## Tests
 

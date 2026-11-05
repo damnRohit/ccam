@@ -21,6 +21,8 @@ pub trait LoginStore: Send + Sync {
     /// The raw login object, unparsed: an unreadable live login must be reported, not mistaken for none.
     fn read(&self) -> Result<Option<Value>>;
     fn write(&self, login: &OAuthLogin) -> Result<()>;
+    /// Removes the login and keeps every other key, which logs Claude Code out.
+    fn clear(&self) -> Result<()>;
 }
 
 /// Picks the store Claude Code uses on this platform.
@@ -73,6 +75,15 @@ impl LoginStore for FileStore {
 
     fn write(&self, login: &OAuthLogin) -> Result<()> {
         let doc = document_with_login(jsonio::read(&self.path)?, login);
+        jsonio::write_atomic(&self.path, &doc, Style::Compact, true)
+    }
+
+    fn clear(&self) -> Result<()> {
+        let Some(mut doc) = jsonio::read(&self.path)? else { return Ok(()) };
+        let Some(map) = doc.as_object_mut() else { return Ok(()) };
+        if map.shift_remove(LOGIN_KEY).is_none() {
+            return Ok(());
+        }
         jsonio::write_atomic(&self.path, &doc, Style::Compact, true)
     }
 }
@@ -154,7 +165,28 @@ mod keychain {
         }
 
         fn write(&self, login: &OAuthLogin) -> Result<()> {
-            let doc = document_with_login(self.read_document()?, login);
+            self.write_document(&document_with_login(self.read_document()?, login))?;
+            // `security -i` exits 0 even when the command inside it failed, so the only proof is reading it back.
+            if self.read()?.as_ref() == Some(&login.to_value()) {
+                Ok(())
+            } else {
+                Err(Error::Keychain("the write did not take effect".into()))
+            }
+        }
+
+        fn clear(&self) -> Result<()> {
+            let Some(mut doc) = self.read_document()? else { return Ok(()) };
+            let Some(map) = doc.as_object_mut() else { return Ok(()) };
+            if map.shift_remove(LOGIN_KEY).is_none() {
+                return Ok(());
+            }
+            self.write_document(&doc)?;
+            if self.read()?.is_none() { Ok(()) } else { Err(Error::Keychain("the write did not take effect".into())) }
+        }
+    }
+
+    impl KeychainStore {
+        fn write_document(&self, doc: &Value) -> Result<()> {
             let secret = hex::encode(serde_json::to_vec(&doc).expect("JSON values always serialize"));
             let line = format!(
                 "add-generic-password -U -a {} -s {} -X {}\n",
@@ -184,13 +216,7 @@ mod keychain {
                     .status()
                     .map_err(spawn_error)?;
             }
-
-            // `security -i` exits 0 even when the command inside it failed, so the only proof is reading it back.
-            if self.read()?.as_ref() == Some(&login.to_value()) {
-                Ok(())
-            } else {
-                Err(Error::Keychain("the write did not take effect".into()))
-            }
+            Ok(())
         }
     }
 }
@@ -215,6 +241,20 @@ mod tests {
         let doc = jsonio::read(&path).unwrap().unwrap();
         assert_eq!(doc, json!({"mcpOAuth": {"server": {"token": "m"}}, "claudeAiOauth": new}));
         assert_eq!(store.read().unwrap(), Some(new));
+    }
+
+    #[test]
+    fn clearing_the_file_store_logs_out_and_keeps_sibling_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".credentials.json");
+        std::fs::write(&path, r#"{"mcpOAuth":{"m":1},"claudeAiOauth":{"accessToken":"a"}}"#).unwrap();
+
+        let store = FileStore::new(path.clone());
+        store.clear().unwrap();
+        store.clear().unwrap();
+
+        assert_eq!(jsonio::read(&path).unwrap().unwrap(), json!({"mcpOAuth": {"m": 1}}));
+        assert!(store.read().unwrap().is_none());
     }
 
     #[test]

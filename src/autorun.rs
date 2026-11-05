@@ -493,6 +493,12 @@ mod tests {
             self.requests.lock().unwrap().push(access_token.to_string());
             self.usage.lock().unwrap().get(access_token).cloned().ok_or(ApiError::Status(404))
         }
+        fn profile(&self, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!("auto never reads profiles")
+        }
+        fn referral_eligibility(&self, _: &str, _: &str) -> std::result::Result<Value, ApiError> {
+            unreachable!("auto never reads guest passes")
+        }
     }
 
     #[derive(Default)]

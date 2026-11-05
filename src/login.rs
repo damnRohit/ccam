@@ -42,6 +42,7 @@ pub struct OAuthLogin {
     expires_at: UnixMillis,
     session_expires_at: Option<i64>,
     subscription_type: Option<String>,
+    rate_limit_tier: Option<String>,
     raw: Map<String, Value>,
 }
 
@@ -66,6 +67,7 @@ impl OAuthLogin {
                 .ok_or("login has no expiresAt")?,
             session_expires_at: raw.get("refreshTokenExpiresAt").and_then(Value::as_i64),
             subscription_type: text("subscriptionType"),
+            rate_limit_tier: text("rateLimitTier"),
             raw,
         })
     }
@@ -84,6 +86,10 @@ impl OAuthLogin {
 
     pub fn subscription_type(&self) -> Option<&str> {
         self.subscription_type.as_deref()
+    }
+
+    pub fn rate_limit_tier(&self) -> Option<&str> {
+        self.rate_limit_tier.as_deref()
     }
 
     /// Access tokens this close to expiry count as expired, so a request never races the deadline.
@@ -105,13 +111,23 @@ impl OAuthLogin {
         self.expires_at > other.expires_at
     }
 
+    /// Jitter tolerance for `refreshTokenExpiresAt` between renewals of the same session, accounting for
+    /// serialization, clock drift and timer differences in Claude Code.
+    pub const SESSION_EXPIRY_TOLERANCE: Duration = Duration::from_secs(60);
+
     /// Whether both are renewals of the same `/login`. A renewal replaces the tokens but keeps the login's own
     /// expiry (`refreshTokenExpiresAt`); a new login gets a new one. Logins without the field never match.
     ///
     /// This is an observation of Claude Code's behaviour, not a documented contract. When it does not hold,
     /// ccam falls back to confirming ownership over the network, which is slower but still safe.
     pub fn same_session_as(&self, other: &Self) -> bool {
-        matches!((self.session_expires_at, other.session_expires_at), (Some(a), Some(b)) if a == b)
+        match (self.session_expires_at, other.session_expires_at) {
+            (Some(a), Some(b)) => {
+                let diff = (a - b).unsigned_abs();
+                diff <= Self::SESSION_EXPIRY_TOLERANCE.as_millis() as u64
+            }
+            _ => false,
+        }
     }
 
     /// A copy carrying the tokens from a refresh grant.
@@ -184,8 +200,9 @@ mod tests {
 
     #[test]
     fn same_session_requires_matching_known_login_expiry() {
-        assert!(login(1, Some(9)).same_session_as(&login(2, Some(9))));
-        assert!(!login(1, Some(9)).same_session_as(&login(2, Some(8))));
+        assert!(login(1, Some(9_000)).same_session_as(&login(2, Some(9_000))));
+        assert!(login(1, Some(9_000)).same_session_as(&login(2, Some(9_837))));
+        assert!(!login(1, Some(9_000)).same_session_as(&login(2, Some(90_000))));
         assert!(!login(1, None).same_session_as(&login(2, None)));
     }
 
@@ -200,6 +217,14 @@ mod tests {
             ("a2", "r2", UnixMillis::from_millis(5))
         );
         assert_eq!(refreshed.to_value()["scopes"], json!(["x"]));
+    }
+
+    #[test]
+    fn the_plan_and_its_rate_limit_tier_are_read_and_kept_verbatim() {
+        let value = json!({"accessToken": "a", "refreshToken": "r", "expiresAt": 1, "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x", "zeta": 1});
+        let login = OAuthLogin::parse(value.clone()).unwrap();
+        assert_eq!((login.subscription_type(), login.rate_limit_tier()), (Some("max"), Some("default_claude_max_20x")));
+        assert_eq!(login.to_value(), value);
     }
 
     #[test]

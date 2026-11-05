@@ -153,6 +153,13 @@ Shape (H#configuration, H#hook-handler-fields), in `~/.claude/settings.json` (al
 - **(inferred)** `accountUuid` + `organizationUuid` is the stable key and email is display only. The identity lives in `.claude.json` while the tokens live in `.credentials.json` or the Keychain, so a switch has to write both consistently.
 - `claude auth status` has `--json` (default) and `--text` (local `claude auth status --help`). `claude auth login` has `--claudeai`, `--console`, `--email`, `--sso` (local help).
 
+### 2.5 Profile and guest pass data read by `usage --info` (Claude Code 2.1.314, all *undocumented*)
+Evidence and live checks: `docs/research/billing.md`.
+- `GET https://api.anthropic.com/api/oauth/profile`, same Bearer token and `anthropic-beta: oauth-2025-04-20` as the usage call. ccam reads `account.display_name`, `account.full_name`, `account.created_at`, `organization.name`, `organization.organization_type`, `organization.rate_limit_tier`, `organization.billing_type`, `organization.subscription_status`, `organization.subscription_created_at`, `organization.claude_code_trial_ends_at`, `organization.seat_tier` and `organization.has_extra_usage_enabled`. Claude Code itself never reads `subscription_status`, so its values are unverified beyond `active` seen live.
+- `GET https://api.anthropic.com/api/oauth/organizations/<organizationUuid>/referral/eligibility?campaign=claude_code_guest_pass`, with the Bearer token, `anthropic-version: 2023-06-01` and an `x-organization-uuid: <organizationUuid>` header. Read-only. Claude Code calls it only for `pro` and `max` logins. ccam reads `eligible`, `remaining_passes`, `limit` and `referrer_reward{amount_minor_units, currency}`. The response also holds `referral_code_details`, `share_link` and `terms_url`, which are a credential and are never read.
+- `~/.claude.json` key `passesEligibilityCache[<organizationUuid>]` holds the same eligibility object plus a millisecond `timestamp`. Claude Code treats it as stale after 24 hours. Ineligible entries have `eligible: false` and null fields. ccam only reads it.
+- Not available to an OAuth token, so not shown: billing period, next charge, monthly vs annual, cancel date (claude.ai `subscription_details`, session cookie only).
+
 ---
 
 ## 3. Token refresh and rotation

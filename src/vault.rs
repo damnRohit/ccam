@@ -71,11 +71,17 @@ impl VaultLock {
 
 pub struct Vault {
     dir: PathBuf,
+    /// Prefixes this install's log lines, so a lane's events can be told from the main login's.
+    tag: Option<String>,
 }
 
 impl Vault {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { dir, tag: None }
+    }
+
+    pub fn tagged(self, tag: Option<String>) -> Self {
+        Self { tag, ..self }
     }
 
     pub fn dir(&self) -> &Path {
@@ -130,7 +136,11 @@ impl Vault {
 
     /// Appends one line to the switch log. Never pass secrets or email addresses.
     pub fn log(&self, message: &str) {
-        let line = format!("{} {message}\n", jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ"));
+        let now = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ");
+        let line = match &self.tag {
+            Some(tag) => format!("{now} [{tag}] {message}\n"),
+            None => format!("{now} {message}\n"),
+        };
         let path = self.dir.join(LOG_FILE);
         // Logging is diagnostic; a read-only vault must not turn a successful switch into a failure.
         let _ = fs::create_dir_all(&self.dir)
@@ -233,6 +243,17 @@ mod tests {
 
     fn locked(vault: &Vault) -> VaultLock {
         VaultLock::acquire(vault, LockTiming::VAULT).unwrap()
+    }
+
+    #[test]
+    fn a_tagged_vault_marks_its_log_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        Vault::new(dir.path().to_path_buf()).log("sync 'a'");
+        Vault::new(dir.path().to_path_buf()).tagged(Some("lane 2".into())).log("sync 'b'");
+
+        let log = fs::read_to_string(dir.path().join(LOG_FILE)).unwrap();
+        let lines: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
+        assert_eq!(lines, ["sync 'a'", "[lane 2] sync 'b'"]);
     }
 
     #[test]
