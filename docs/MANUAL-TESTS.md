@@ -129,6 +129,8 @@ Pass: every value that claude.ai also shows agrees, and nothing sensitive beyond
 
 ## Results
 
+Before publishing lane changes, install `skills/ccam` using the README instructions in a disposable agent configuration. Confirm the skill is discovered and recommends `ccam run` for a standalone terminal, and selecting a provider tab **and a model** for T3. In T3, send a user-approved test message and confirm its run uses the selected instance; selecting only a tab must not be reported as a completed switch. A handoff is not proof that all historical context or cache transferred. Do not use real account credentials in automated tests.
+
 | Date | Claude Code | OS | Tests | Result | Notes |
 |---|---|---|---|---|---|
 | | | | | | |

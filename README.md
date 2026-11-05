@@ -50,7 +50,7 @@ $ ccam usage
 You need [Claude Code](https://code.claude.com) and [Rust](https://rustup.rs) 1.88 or newer.
 
 ```sh
-git clone <this repository's URL> ccam
+git clone https://github.com/damnRohit/ccam.git
 cd ccam
 cargo install --locked --path .
 ccam setup
@@ -186,9 +186,9 @@ If T3 is not installed, ccam prints `T3 Code not found; skipped adding the lane 
 
 Lane ids with a `.`, `_` or `@`, or very long ones, get a sanitised instance id with `_` and an 8-character hash at the end (T3's id rule); the label always shows the real lane id.
 
-- **One thread, one account.** In T3, pick the lane's instance in the model picker for each thread. Threads on different instances run on different accounts at the same time.
+- **One thread, one account.** In T3's model picker, select the lane's provider tab, then click a model inside it to apply the choice. Selecting only the tab browses its models; it does not change the thread's account. Threads on different instances run on different accounts at the same time.
 - **Child agents stay in the lane.** A Claude child agent started with `delegate_task` or `create_threads` without a target uses its parent's instance. Codex and Antigravity threads use their own logins.
-- **When an account runs out**, run `ccam move <lane> <other>`. Every thread in the lane keeps its conversation and rebuilds its prompt cache once. Switching a thread to another instance inside T3 is different: it starts a fresh session that sees only about 16k tokens of the old history.
+- **When an account runs out**, run `ccam move <lane> <other>`. Every thread in the lane keeps its conversation; prompt-cache reuse across accounts is not guaranteed. Switching a thread to another instance inside T3 is different: it starts a fresh native session with a bounded selection of history. Older details, attachments, and live tool state are not automatically replayed. The visible chat and project files remain, and the agent can retrieve omitted history through T3's tools.
 - **The lane follows your main config.** The lane's session-start hook refreshes its copies of `settings.json`, `CLAUDE.md` and `keybindings.json` (writing only what changed), so edits reach the next session.
 - **The instance follows the lane.** `ccam move` relabels it, `ccam release` disables it, and `ccam release --delete` and `ccam prune` remove it with the lane. A lane is enabled only while it holds a saved account. ccam sets only `driver`, `displayName`, `enabled` and `config.homePath` of its own `ccam-lane-*` entries and keeps everything else in `settings.json`.
 - **Memory.** T3 threads run in full-access mode, which should not ask before memory writes. This is not yet tested in T3 (anthropics/claude-code#98044); step 1 of the manual test in [docs/MANUAL-TESTS.md](docs/MANUAL-TESTS.md) checks it.
@@ -250,7 +250,26 @@ How you use multiple subscriptions is your responsibility.
 ## For AI agents
 
 - [AGENTS.md](AGENTS.md) is for an agent **changing this code**: layout, the invariants that must hold, and how to verify.
-- [skills/ccam/SKILL.md](skills/ccam/SKILL.md) is for an agent **operating ccam for you**. Copy the `skills/ccam` folder into `~/.claude/skills/` and Claude Code can check usage, switch accounts and diagnose errors when you ask.
+- [skills/ccam/SKILL.md](skills/ccam/SKILL.md) is for an agent **operating ccam for you**: setup, saved accounts, usage, isolated Claude Code sessions, T3 lanes, and errors. The same skill covers both clients; T3 integration is optional.
+
+From this repository's root, install the skill for Claude Code:
+
+```powershell
+$skillHome = Join-Path $HOME '.claude/skills'
+New-Item -ItemType Directory -Path $skillHome -Force | Out-Null
+Copy-Item -LiteralPath './skills/ccam' -Destination $skillHome -Recurse
+```
+
+For Codex, use `.agents/skills` instead of `.claude/skills`. On Linux or macOS:
+
+```sh
+mkdir -p ~/.claude/skills
+cp -R skills/ccam ~/.claude/skills/
+```
+
+Check for an existing `ccam` skill before copying; review and replace that skill deliberately when updating. Restart the agent session if the skill does not appear. T3 uses the skills of its underlying agent; ccam's Claude lanes share the main Claude skills directory.
+
+Ask the agent: "Use the ccam skill to check my setup and usage. Do not switch accounts unless I ask." Installation copies instructions only, never saved logins. For another machine, install ccam there and sign in separately; copying refresh tokens does not coordinate their use across machines.
 
 ## Uninstall
 

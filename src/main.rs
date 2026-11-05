@@ -800,7 +800,7 @@ fn available_lane(manager: &Manager) -> Result<LaneId> {
         if let Ok(paths) = lane::paths(main, &id)
             && let Ok(in_lane) = manager_for(paths)
             && let Ok(overview) = in_lane.overview()
-            && overview.live_account().is_none()
+            && matches!(overview.live, LiveState::LoggedOut)
             && lane_sessions(in_lane.paths()).is_ok_and(|s| s.is_empty())
         {
             return Ok(id);
@@ -886,7 +886,9 @@ fn release_lane(manager: &Manager, id: &LaneId, force: bool, delete: bool) -> Re
         }
     }
     if delete {
-        lane::remove(manager.paths(), &id)?;
+        if !manager.remove_lane(&in_lane, &id)? {
+            return Err(Error::Lane(format!("lane {id} acquired a login before deletion; nothing was deleted")));
+        }
         println!("Removed lane {id}.");
     }
     Ok(())
@@ -899,10 +901,8 @@ fn prune_lanes(manager: &Manager) -> Result<()> {
     for id in lane::all(main) {
         let in_lane = manager_for(lane::paths(main, &id)?)?;
         let overview = in_lane.overview()?;
-        let holds = overview.live_account();
         let running = lane_sessions(in_lane.paths()).map(|s| s.len()).unwrap_or(1);
-        if holds.is_none() && running == 0 {
-            lane::remove(main, &id)?;
+        if matches!(overview.live, LiveState::LoggedOut) && running == 0 && manager.remove_lane(&in_lane, &id)? {
             println!("Removed empty lane {id}.");
             removed += 1;
         }
@@ -916,15 +916,21 @@ fn prune_lanes(manager: &Manager) -> Result<()> {
 /// The main login and every lane: the account each holds and the sessions running on it.
 fn print_sessions(manager: &Manager) -> Result<()> {
     let main = manager.paths();
-    let mut rows =
-        vec![("main".to_string(), manager.overview()?.live_account().map(|a| a.name.clone()), lane_sessions(main))];
+    let account_label = |overview: ccam::manager::Overview| match overview.live_account() {
+        Some(account) => format!("'{}'", account.name),
+        None => match overview.live {
+            LiveState::LoggedOut => "no account".to_string(),
+            LiveState::Unreadable => "login unreadable".to_string(),
+            LiveState::Present(_) => "unsaved login".to_string(),
+        },
+    };
+    let mut rows = vec![("main".to_string(), account_label(manager.overview()?), lane_sessions(main))];
     for id in lane::all(main) {
         let in_lane = manager_for(lane::paths(main, &id)?)?;
-        let holds = in_lane.overview()?.live_account().map(|a| a.name.clone());
+        let holds = account_label(in_lane.overview()?);
         rows.push((format!("lane {id}"), holds, lane_sessions(in_lane.paths())));
     }
     for (label, holds, sessions) in rows {
-        let holds = holds.map_or("no account".to_string(), |name| format!("'{name}'"));
         match sessions {
             Ok(sessions) if sessions.is_empty() => println!("{label}  {holds}  no sessions"),
             Ok(sessions) => {

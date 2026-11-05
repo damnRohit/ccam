@@ -286,7 +286,8 @@ fn link_dir(target: &Path, link: &Path) -> Result<()> {
 
 /// Safely deletes a lane directory. It unlinks every shared junction or symlink first, so the target directories
 /// in the main config home and vault are never touched.
-pub fn remove(main: &Paths, id: &LaneId) -> Result<()> {
+pub(crate) fn remove(main: &Paths, id: &LaneId, locks: &crate::manager::SwitchLocks) -> Result<()> {
+    locks.check()?;
     let lane = paths(main, id)?;
     let home = &lane.config_home;
     if !home.exists() {
@@ -522,9 +523,27 @@ mod tests {
         assert!(lane.config_home.exists());
         assert!(lane.vault_dir.join("a").is_dir());
 
-        remove(&main, &id("b")).unwrap();
+        let manager = |paths: &Paths| {
+            let endpoint = "http://127.0.0.1:9".to_string();
+            let api = crate::api::Api::new(
+                crate::api::Endpoints {
+                    usage: endpoint.clone(),
+                    profile: endpoint.clone(),
+                    token: endpoint.clone(),
+                    organizations: endpoint,
+                },
+                std::time::Duration::from_millis(1),
+            );
+            crate::manager::Manager::new(
+                paths.clone(),
+                Box::new(crate::store::FileStore::new(paths.credentials_file.clone())),
+                Box::new(api),
+            )
+        };
+        assert!(manager(&main).remove_lane(&manager(&lane), &id("b")).unwrap());
         assert!(!lane.config_home.exists(), "lane directory must be deleted");
         assert!(main.vault_dir.join("a").is_dir(), "main vault must remain intact");
+        assert!(!main.vault_lock.exists(), "the main vault lock must be released after unlinking the lane");
         assert!(main.config_home.join("projects").join("p").is_dir(), "main projects must remain intact");
     }
 

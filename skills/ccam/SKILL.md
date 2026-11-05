@@ -1,6 +1,6 @@
 ---
 name: ccam
-description: Operate ccam, the Claude Code account switcher. Use when the user asks which Claude account is live, how much usage is left, to switch accounts, to save or rename an account, or when a ccam command printed an error.
+description: Set up and operate ccam for Claude Code or T3 Code. Use for saved Claude accounts, usage checks, isolated account lanes, account switching, or ccam errors.
 ---
 
 # ccam
@@ -17,11 +17,19 @@ ccam keeps several Claude subscription logins and swaps which one Claude Code us
 
 ## Tasks
 
+**Set up ccam.** Check `ccam --version`, `ccam help`, and `claude --version` first. If ccam is missing, follow the repository README's Install section, then run `ccam setup` only when the user requested setup. Existing accounts and live logins must be preserved. Use `ccam`, not the optional `cs` alias, in commands. Done when the CLI runs and the requested hooks are installed. Do not sign in or switch accounts just to test installation.
+
 **Which account, how much is left.** Run `ccam usage`. Report per account: the 5-hour and weekly percentage and when each resets, and which one is live (`current`). Done when every account is reported or its line explains why it is not (`stale`, rate limited, error).
 
 **Switch.** Run `ccam to <name>`. Then tell the user the switch applies to every open session from its next message, and that a session that does not pick it up resumes with `claude --continue`. Done when ccam printed `Switched from ... to '<name>'`.
 
 **Keep one terminal on one account.** When the user wants a project or a second session to stay on another account (and keep its prompt cache) while other sessions stay where they are, tell them to run `ccam run <name>` in a normal terminal; it opens Claude Code in a lane and cannot be run from inside Claude Code. `ccam sessions` shows the lanes and their sessions. To move a lane whose account is exhausted: `ccam move <lane> <other> --yes`, only when the user asked for that move. To hand an account back: close the lane's sessions, then `ccam release <lane>` (or `ccam release <lane> --delete` to remove its folder too). To remove all empty lane directories: `ccam prune`.
+
+**Check lane safety.** `ccam sessions` distinguishes `no account`, `unsaved login`, and `login unreadable`. Only a logged-out lane with no sessions is empty; allocation and `prune` preserve the other states. For an unsaved login, ask for a name and use `ccam save <name> --lane <id>`. If verification fails, preserve the login and report the error. Never delete a lane or its credentials as a workaround.
+
+**Select a T3 lane.** In the model picker, choose the lane's provider tab, then click a model within it. Clicking only the tab does not apply the selection. Confirm the next run's provider instance, not just the tab being browsed. Moving a thread between lane instances may trigger a bounded history handoff: files and visible chat remain, but not all prior context, attachments, native tool state, or prompt cache transfer. Do not promise exact session continuity.
+
+**Set up another machine.** Install ccam and this skill there; use separate browser sign-ins for the accounts the user requests. There is no ccam export/import command. Do not copy the vault, live credentials, lane junctions, locks, or presence records between machines. Independent machines do not coordinate copied refresh tokens. Done when the requested accounts are saved locally and requested lanes are created, without changing source-machine logins.
 
 **Pick the best account to switch to.** Run `ccam usage`, rank accounts by the higher of their two percentages (lower is better), skip any `in use on ...` in `ccam list`, and recommend one. Switch only if the user then agrees.
 
@@ -29,9 +37,11 @@ ccam keeps several Claude subscription logins and swaps which one Claude Code us
 
 **Add an account.** Suggest `ccam login <name>` (the user types `cs login <name>` if their shell has the alias). Tell the user what it does: the browser opens, they sign in as the new account, and ccam saves it under `<name>` without touching the main login, lanes or open sessions. Tell them to use a private browser window if their browser is signed in to another saved account. Done when ccam printed `Saved '<name>'. Switch to it with: ccam to <name>`. For an account that is saved but dead, `ccam login <name>` prints `Refreshed the saved login of '<name>'.` instead, and works only while the account is in use nowhere. Never run `claude auth logout` for this: it revokes the login ccam just saved.
 
-**Use lanes in T3 Code.** T3 Code starts Claude itself, so `ccam run` does not apply. When the user wants T3 threads on different accounts at once, tell them to run `ccam lane <account> [--lane <id>]` (it checks a saved account out into a lane without opening Claude Code, reusing the lane that already holds the account, and adds a T3 instance labelled `Claude · lane <id> · <account>`; lane ids with `.`, `_` or `@` get a sanitised instance id with a hash). Done when ccam printed `Lane <id> holds '<account>'.` and `T3 Code: lane <id> is in the model picker as ...`. In T3 they pick that instance in the model picker for each thread. Threads on different instances run on different accounts at once. Claude child agents (`delegate_task`, `create_threads` without a target) stay on their parent's instance. When a lane's account runs out, `ccam move <lane> <other> --yes`, only when the user asked: threads keep their conversation. Switching a thread to another instance inside T3 starts a fresh session with about 16k tokens of history, so prefer `move`. `ccam release <lane>` disables the instance; `--delete` and `ccam prune` remove it. If T3 does not show the lane, read `docs/TROUBLESHOOTING.md`. The lane's copies of the main `settings.json`, `CLAUDE.md` and `keybindings.json` refresh at each session start.
+**Use lanes in T3 Code.** T3 Code starts Claude itself, so use `ccam lane <account> [--lane <id>]`, not `ccam run`. It checks the account out without launching Claude, reuses its existing lane, and adds a T3 instance labelled `Claude · lane <id> · <account>`. Done when the command reports both the lane's account and its model-picker entry. Select the instance and a model for each thread; threads on different instances use different accounts concurrently. Claude children created without a target inherit their parent's instance. When the account runs out, use `ccam move <lane> <other> --yes` only when requested: conversations stay in that lane, but prompt-cache reuse across accounts is not guaranteed. Changing instances instead uses the history handoff described above. `ccam release` disables the instance; `--delete` and `prune` remove it. If it does not appear, consult troubleshooting. Lane copies of the main `settings.json`, `CLAUDE.md`, and `keybindings.json` refresh at each session start.
 
 **Fix an error.** Match the message below. When it is not listed, read `docs/TROUBLESHOOTING.md` in the ccam repository, which lists every message. Done when the user knows the cause and the exact command or action that fixes it, and you have run the fix if it is a read-only or user-requested command.
+
+When installed without a repository checkout, use the [README](https://github.com/damnRohit/ccam/blob/main/README.md) for installation and the [troubleshooting guide](https://github.com/damnRohit/ccam/blob/main/docs/TROUBLESHOOTING.md) for errors. Do not guess an unsupported command.
 
 ## Errors
 

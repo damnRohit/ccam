@@ -167,7 +167,7 @@ impl SwitchLocks {
         Ok(Self { config: lock::acquire(&paths.global_config_lock, timing)?, credentials })
     }
 
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         self.credentials.check()?;
         self.config.ensure_held()
     }
@@ -294,6 +294,21 @@ impl Manager {
     /// A consistent-enough read of saved accounts and the live login, without locks, for display.
     pub fn overview(&self) -> Result<Overview> {
         Ok(Overview { listing: self.vault.list()?, live: self.read_live()? })
+    }
+
+    pub fn remove_lane(&self, lane: &Self, id: &crate::lane::LaneId) -> Result<bool> {
+        if lane.paths.config_home != crate::lane::paths(&self.paths, id)?.config_home {
+            return Err(Error::Lane("the lane paths do not match the main config directory".into()));
+        }
+        let vault = self.lock_vault()?;
+        let credentials = CredentialLocks::acquire(vault, &lane.paths, lane.timings.credentials)?;
+        let locks = SwitchLocks::acquire(credentials, &lane.paths, lane.timings.config)?;
+        if !matches!(lane.read_live()?, LiveState::LoggedOut) {
+            return Ok(false);
+        }
+        lane.record_presence(locks.credentials.vault());
+        crate::lane::remove(&self.paths, id, &locks)?;
+        Ok(true)
     }
 
     pub fn sync(&self, network: Network) -> Result<SyncOutcome> {

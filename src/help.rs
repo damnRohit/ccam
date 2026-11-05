@@ -187,6 +187,7 @@ Examples:
 
 pub const PRUNE: &str = "\
 Removes empty lane directories that hold no account and have no running Claude Code sessions.
+Lanes with an unsaved or unreadable login are kept, never treated as empty.
 
 Examples:
   ccam prune";
@@ -194,6 +195,7 @@ Examples:
 pub const SESSIONS: &str =
     "Lists the main login and every lane: the account each holds and its running Claude Code sessions (status,
 folder, session id, pid), read with `claude agents --json`.
+An unknown account is shown as 'unsaved login'; incomplete credentials as 'login unreadable'.
 
 Examples:
   ccam sessions";

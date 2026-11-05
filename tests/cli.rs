@@ -466,6 +466,8 @@ impl FakeClaude {
                 "if defined FAKE_CLAUDE_VERSION (echo %FAKE_CLAUDE_VERSION%) else (echo 2.1.296 ^(Claude Code^))",
                 "exit /b 0",
                 ":agents",
+                "if defined FAKE_AGENTS_INSTALL_FROM copy /y \"%FAKE_AGENTS_INSTALL_FROM%\\.credentials.json\" \"%CLAUDE_CONFIG_DIR%\\.credentials.json\" >nul",
+                "if defined FAKE_AGENTS_INSTALL_FROM copy /y \"%FAKE_AGENTS_INSTALL_FROM%\\.claude.json\" \"%CLAUDE_CONFIG_DIR%\\.claude.json\" >nul",
                 "if exist \"%CLAUDE_CONFIG_DIR%\\fake-agents.json\" (type \"%CLAUDE_CONFIG_DIR%\\fake-agents.json\") else (echo [])",
             ]
             .join("\r\n"),
@@ -477,7 +479,7 @@ impl FakeClaude {
                 "#!/bin/sh",
                 "case \"$1\" in",
                 "  --version) echo \"${FAKE_CLAUDE_VERSION:-2.1.296 (Claude Code)}\"; exit 0;;",
-                "  agents) cat \"$CLAUDE_CONFIG_DIR/fake-agents.json\" 2>/dev/null || echo '[]'; exit 0;;",
+                "  agents) if [ -n \"${FAKE_AGENTS_INSTALL_FROM:-}\" ]; then cp \"$FAKE_AGENTS_INSTALL_FROM/.credentials.json\" \"$CLAUDE_CONFIG_DIR/.credentials.json\"; cp \"$FAKE_AGENTS_INSTALL_FROM/.claude.json\" \"$CLAUDE_CONFIG_DIR/.claude.json\"; fi; cat \"$CLAUDE_CONFIG_DIR/fake-agents.json\" 2>/dev/null || echo '[]'; exit 0;;",
                 "esac",
                 &format!("echo \"$CLAUDE_CONFIG_DIR|$*\" >> '{}'", log.display()),
                 "[ \"$1\" = auth ] || exit 0",
@@ -506,6 +508,7 @@ impl FakeClaude {
             .env_remove("FAKE_LOGIN_UUID")
             .env_remove("FAKE_LOGIN_EXPIRES")
             .env_remove("FAKE_LOGIN_FAIL");
+        cmd.env_remove("FAKE_AGENTS_INSTALL_FROM");
         cmd
     }
 
@@ -1041,6 +1044,57 @@ fn lane_checks_an_account_out_without_launching_claude_and_refuses_what_run_refu
     assert!(claude.stdout(&home, &["lane", "a"]).contains("Lane 1 holds 'a'."), "an account's lane is reused");
 
     assert!(!claude.log.exists(), "ccam lane never starts claude");
+}
+
+#[test]
+fn prune_rechecks_a_login_installed_after_the_empty_lane_observation() {
+    let home = three_accounts();
+    let claude = FakeClaude::new(&home);
+    claude.stdout(&home, &["lane", "a"]);
+    let lane = home.claude().join("ccam/lanes/1");
+    let late_login = home.path().join("late-login");
+    fs::create_dir(&late_login).unwrap();
+    for file in [".credentials.json", ".claude.json"] {
+        fs::copy(lane.join(file), late_login.join(file)).unwrap();
+    }
+    claude.stdout(&home, &["release", "1"]);
+    claude
+        .ccam(&home, &["prune"])
+        .env("FAKE_AGENTS_INSTALL_FROM", &late_login)
+        .assert()
+        .success()
+        .stdout(contains("No empty lanes to remove."));
+    assert_eq!(
+        fs::read(lane.join(".credentials.json")).unwrap(),
+        fs::read(late_login.join(".credentials.json")).unwrap()
+    );
+}
+
+#[test]
+fn lanes_with_unsaved_or_unreadable_logins_are_not_empty() {
+    for unreadable in [false, true] {
+        let home = three_accounts();
+        let claude = FakeClaude::new(&home);
+        claude.stdout(&home, &["lane", "a"]);
+        let lane = home.claude().join("ccam/lanes/1");
+        if unreadable {
+            fs::write(lane.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"incomplete-test-token"}}"#)
+                .unwrap();
+        } else {
+            let mut config: Value = serde_json::from_slice(&fs::read(lane.join(".claude.json")).unwrap()).unwrap();
+            config["oauthAccount"]["accountUuid"] = json!("UNSAVED");
+            fs::write(lane.join(".claude.json"), config.to_string()).unwrap();
+        }
+        let before = fs::read(lane.join(".credentials.json")).unwrap();
+        let state = if unreadable { "login unreadable" } else { "unsaved login" };
+        let sessions = claude.stdout(&home, &["sessions"]);
+        claude.stdout(&home, &["prune"]);
+        assert_eq!(fs::read(lane.join(".credentials.json")).unwrap(), before);
+        let out = claude.stdout(&home, &["lane", "b"]);
+        assert!(out.contains("Lane 2 holds 'b'."), "{out}");
+        assert_eq!(fs::read(lane.join(".credentials.json")).unwrap(), before);
+        assert!(sessions.contains(&format!("lane 1  {state}")), "{sessions}");
+    }
 }
 
 #[test]

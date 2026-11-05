@@ -37,6 +37,8 @@ Same cause as above, shown by `list`.
 You are logged in to an account ccam does not know. Switching away would throw that login away. Save it first, then switch.
 
 ### `The logged-in account is not saved. Run: ccam save <name>`
+
+In `ccam sessions`, `unsaved login` means that config directory has a login whose identity is not in the vault; it is not empty. Save it with `ccam save <name> --lane <id>` when it belongs to a lane. `login unreadable` means its credentials or identity are incomplete. ccam keeps both states out of automatic lane allocation and pruning. Do not delete credentials to bypass this protection.
 The same, from `ccam list` or `ccam sync`. Harmless until you want to switch away.
 
 ### `the logged-in account is already saved as '<name>'`
@@ -67,6 +69,14 @@ The saved copy is a later generation than the live login. Overwriting it would i
 From `ccam sync`: the same situation, reported without failing. Nothing to do unless switching fails.
 
 ## Adding an account with ccam login
+
+### `lane <id> acquired a login before deletion; nothing was deleted`
+
+Another operation populated the lane between release and deletion. The locked recheck kept it intact. Run `ccam sessions` and decide whether to keep the lane or release its new login; do not delete the directory by hand.
+
+### `the lane paths do not match the main config directory`
+
+The requested deletion does not belong to this main config directory. No lane was removed. Run ccam from the main configuration and check `CLAUDE_CONFIG_DIR` before retrying.
 
 `ccam login <name>` runs Claude Code's sign-in in a throwaway folder under `~/.claude/ccam/login/`, saves the login and deletes the folder. It never changes the main login, lanes or open sessions. `switch.log` records `login '<name>' (new)` or `login '<name>' (refreshed)`.
 
@@ -242,7 +252,7 @@ T3 Code: lane 1 is in the model picker as 'Claude · lane 1 · work'.
 ```
 
 ### T3 does not show the lane
-1. Run `ccam sessions`. The lane must exist and hold an account. A lane with no account has its instance disabled, so T3 hides it from the model picker.
+1. Run `ccam sessions`. The lane must exist and hold a saved account. A lane without a recognized saved account has its instance disabled, so T3 hides it from the model picker. In the picker, select the lane's provider tab and then click a model; browsing the tab alone does not switch the thread.
 2. Open `~/.t3/userdata/settings.json` and look under `providerInstances` for the lane's instance (see the instance id entry below). Its `displayName` reads `Claude · lane <id> · <account>` and `config.homePath` is the lane's folder under `~/.claude/ccam/lanes/`. If the entry is missing, run `ccam lane <account> --lane <id>` again.
 3. If T3 keeps its data somewhere else, `T3CODE_HOME` is set. ccam reads it too, but only from the shell it runs in, and an empty value counts as unset. Set it the same way for ccam and for T3, or unset it.
 4. If ccam printed `T3 Code not found; skipped adding the lane to T3.`, there is no `~/.t3/userdata` folder (or `$T3CODE_HOME/userdata`) yet. Start T3 once, then run `ccam lane <account> --lane <id>` again.
