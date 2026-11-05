@@ -47,6 +47,7 @@ impl Home {
             .env("USERPROFILE", self.path())
             .env("CCAM_CREDENTIAL_STORE", "file")
             .env("CCAM_API_BASE", "http://127.0.0.1:9")
+            .env("CCAM_CLAUDE_BIN", self.path().join("missing-claude"))
             // Inside the temp home even for tests that do not care about T3 Code, so none can reach the real one.
             .env("T3CODE_HOME", self.t3())
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -657,13 +658,14 @@ fn a_lane_moves_to_another_account_and_is_released_only_when_idle() {
 
     // Prune removes empty lane 1, while active lane api is kept.
     assert!(lane.exists());
-    let prune_out = home.stdout(&["prune"]);
+    fs::write(lane.join("fake-agents.json"), "[]").unwrap();
+    let prune_out = claude.stdout(&home, &["prune"]);
     assert!(prune_out.contains("Removed empty lane 1"), "{prune_out}");
     assert!(!lane.exists());
     assert!(home.claude().join("ccam").join("lanes").join("api").exists());
 
     // Release with --delete releases and removes the lane folder.
-    let rel_out = home.stdout(&["release", "api", "--delete"]);
+    let rel_out = claude.stdout(&home, &["release", "api", "--delete"]);
     assert!(rel_out.contains("Released 'a' from lane api"), "{rel_out}");
     assert!(rel_out.contains("Removed lane api"), "{rel_out}");
     assert!(!home.claude().join("ccam").join("lanes").join("api").exists());
